@@ -8621,8 +8621,8 @@ if TYPE_CHECKING:
             Swinv2PreTrainedModel,
         )
         from .models.swissai import (
+            SwissAIForCausalLM,
             SwissAIModel,
-            SwissAIConfig,
             SwissAIPreTrainedModel,
         )
         from .models.switch_transformers import (
