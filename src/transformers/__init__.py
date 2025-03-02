@@ -3797,6 +3797,7 @@ else:
         [
             "SwissAIModel",
             "SwissAIConfig",
+            "SwissAIForCausalLM",
             "SwissAIPreTrainedModel",
         ]
     )
