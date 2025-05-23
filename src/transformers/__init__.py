@@ -3799,6 +3799,7 @@ else:
             "SwissAIConfig",
             "SwissAIForCausalLM",
             "SwissAIPreTrainedModel",
+            "SwissAIForTokenClassification",
         ]
     )
     _import_structure["models.switch_transformers"].extend(
@@ -8625,6 +8626,7 @@ if TYPE_CHECKING:
             SwissAIForCausalLM,
             SwissAIModel,
             SwissAIPreTrainedModel,
+            SwissAIForTokenClassification,
         )
         from .models.switch_transformers import (
             SwitchTransformersEncoderModel,
