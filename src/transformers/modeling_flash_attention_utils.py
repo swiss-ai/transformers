@@ -21,6 +21,7 @@ import torch.nn.functional as F
 
 from .utils import (
     is_flash_attn_2_available,
+    is_flash_attn_3_available,
     is_flash_attn_greater_or_equal,
     is_flash_attn_greater_or_equal_2_10,
     is_torch_npu_available,
@@ -30,10 +31,80 @@ from .utils import (
 
 logger = logging.get_logger(__name__)
 flash_attn_func = None
+_IS_FLASH_ATTN_3_AVAILABLE = False
 
 
-if is_flash_attn_2_available():
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+def _index_first_axis(tensor, indices):
+    """
+    A local implementation of the PyTorch indexing operation `tensor[indices]` on the first axis,
+    after flattening the first two dimensions of the tensor. This is functionally equivalent to
+    FA2's `index_first_axis` and replaces the need to import it.
+    """
+    # The input tensor is expected to be of shape (batch, seq_len, ...). We flatten the first
+    # two dimensions to get (total_tokens, ...) before indexing.
+    reshaped_tensor = tensor.reshape(-1, *tensor.shape[2:])
+    return reshaped_tensor[indices]
+
+
+def _fa3_unpad_input(hidden_states, attention_mask, unused_mask=None):
+    """
+    FA3-compatible unpad_input function.
+
+    Arguments:
+        hidden_states: (batch, seqlen, ...)
+        attention_mask: (batch, seqlen), bool / int, 1 means valid and 0 means not valid.
+        unused_mask: (batch, seqlen), bool / int, 1 means the element is allocated but unused.
+    Return:
+        hidden_states: (total_nnz, ...), where total_nnz = number of tokens selected in attention_mask + unused_mask.
+        indices: (total_nnz), the indices of masked tokens from the flattened input sequence.
+        cu_seqlens: (batch + 1), the cumulative sequence lengths, used to index into hidden_states.
+        max_seqlen_in_batch: int
+        seqused: (batch), returns the number of tokens selected in attention_mask + unused_mask.
+    """
+    all_masks = (attention_mask + unused_mask) if unused_mask is not None else attention_mask
+    seqlens_in_batch = all_masks.sum(dim=-1, dtype=torch.int32)
+    used_seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+    indices = torch.nonzero(all_masks.flatten(), as_tuple=False).flatten()
+    max_seqlen_in_batch = seqlens_in_batch.max().item()
+    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+
+    return (
+        _index_first_axis(hidden_states, indices),
+        indices,
+        cu_seqlens,
+        max_seqlen_in_batch,
+        used_seqlens_in_batch,
+    )
+
+
+def _fa3_pad_input(hidden_states, indices, batch, seqlen):
+    """
+    FA3-compatible pad_input function.
+
+    Arguments:
+        hidden_states: (total_nnz, ...), where total_nnz = number of tokens in selected in attention_mask.
+        indices: (total_nnz), the indices that represent the non-masked tokens of the original padded input sequence.
+        batch: int, batch size for the padded sequence.
+        seqlen: int, maximum sequence length for the padded sequence.
+    Return:
+        hidden_states: (batch, seqlen, ...)
+    """
+    dim = hidden_states.shape[1:]
+    output = torch.zeros((batch * seqlen), *dim, device=hidden_states.device, dtype=hidden_states.dtype)
+    output[indices] = hidden_states
+    return output.view(batch, seqlen, *dim)
+
+
+if is_flash_attn_3_available():
+    # Note: FA3 doesn't expose padding utilities as a separate module
+    # We use the local implementations in this file instead
+    # Set up aliases for FA3 padding functions
+    unpad_input = _fa3_unpad_input
+    pad_input = _fa3_pad_input
+    from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+    _IS_FLASH_ATTN_3_AVAILABLE = True
+elif is_flash_attn_2_available():
+    from flash_attn.bert_padding import pad_input, unpad_input  # noqa
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.layers.rotary import apply_rotary_emb  # noqa
 
@@ -42,7 +113,7 @@ if is_flash_attn_2_available():
 if is_torch_npu_available():
     from torch_npu import npu_rotary_mul as apply_rotary_emb  # noqa
 
-    from .integrations.npu_flash_attention import index_first_axis, pad_input, unpad_input
+    from .integrations.npu_flash_attention import pad_input, unpad_input
     from .integrations.npu_flash_attention import npu_flash_attn_func as flash_attn_func
     from .integrations.npu_flash_attention import npu_flash_attn_varlen_func as flash_attn_varlen_func
 
@@ -53,6 +124,9 @@ if flash_attn_func:
 
 def is_flash_attn_available():
     """Determine whether flash-attention can be used or not."""
+
+    if is_flash_attn_3_available():
+        return True
 
     # if package `flash-attn` is available, flash-attention can be used natively.
     if is_flash_attn_2_available():
@@ -67,6 +141,9 @@ def is_flash_attn_available():
 
 def flash_attn_supports_top_left_mask():
     """Determine whether flash-attention uses top-left or down-right mask"""
+
+    if is_flash_attn_3_available():
+        return False
 
     if is_flash_attn_2_available():
         # top-left mask is used in package `flash-attn` with version lower than 2.1.0
@@ -150,12 +227,10 @@ def _upad_input(
     indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
     batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
-    key_layer = index_first_axis(key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k)
-    value_layer = index_first_axis(
-        value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
-    )
+    key_layer = _index_first_axis(key_layer, indices_k)
+    value_layer = _index_first_axis(value_layer, indices_k)
     if query_length == kv_seq_len:
-        query_layer = index_first_axis(query_layer.reshape(batch_size * kv_seq_len, -1, head_dim), indices_k)
+        query_layer = _index_first_axis(query_layer, indices_k)
         cu_seqlens_q = cu_seqlens_k
         max_seqlen_in_batch_q = max_seqlen_in_batch_k
         indices_q = indices_k
@@ -181,7 +256,7 @@ def _upad_input(
     )
 
 
-def prepare_fa2_from_position_ids(query, key, value, position_ids):
+def _prepare_flash_attention_from_position_ids(query, key, value, position_ids):
     """
     This function returns necessary arguments to call `flash_attn_varlen_func`.
     All three query, key, value states will be flattened.
@@ -334,6 +409,12 @@ def _flash_attention_forward(
     )
     flash_kwargs = {"window_size": (sliding_window, sliding_window)} if use_sliding_windows else {}
 
+    if _IS_FLASH_ATTN_3_AVAILABLE:
+        if dropout > 0.0:
+            logger.warning_once("Flash Attention 3 does not support dropout. Setting dropout to 0.0.")
+    else:
+        flash_kwargs["dropout_p"] = dropout
+
     if flash_241:
         if deterministic is None:
             deterministic = deterministic_g
@@ -364,7 +445,6 @@ def _flash_attention_forward(
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=max_seqlen_in_batch_q,
             max_seqlen_k=max_seqlen_in_batch_k,
-            dropout_p=dropout,
             softmax_scale=softmax_scale,
             causal=causal,
             **flash_kwargs,
@@ -381,7 +461,7 @@ def _flash_attention_forward(
 
         if cu_seq_lens_q is None or cu_seq_lens_k is None:
             query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = (
-                prepare_fa2_from_position_ids(query_states, key_states, value_states, position_ids)
+                _prepare_flash_attention_from_position_ids(query_states, key_states, value_states, position_ids)
             )
 
             cu_seq_lens_q, cu_seq_lens_k = cu_seq_lens
@@ -400,7 +480,6 @@ def _flash_attention_forward(
             cu_seqlens_k=cu_seq_lens_k,
             max_seqlen_q=max_length_q,
             max_seqlen_k=max_length_k,
-            dropout_p=dropout,
             softmax_scale=softmax_scale,
             causal=causal,
             **flash_kwargs,
@@ -410,7 +489,7 @@ def _flash_attention_forward(
 
     else:
         attn_output = flash_attn_func(
-            query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal, **flash_kwargs
+            query_states, key_states, value_states, softmax_scale=softmax_scale, causal=causal, **flash_kwargs
         )
 
     return attn_output
