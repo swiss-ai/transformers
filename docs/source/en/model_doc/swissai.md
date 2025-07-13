@@ -23,9 +23,9 @@ rendered properly in your Markdown viewer.
     </div>
 </div>
 
-# Apertus
+# SwissAI
 
-[Apertus](https://www.swiss-ai.org) is a family of large language models from the Swiss AI Initiative.
+[SwissAI](https://www.swiss-ai.org) is a family of large language models from the Swiss AI Initiative.
 
 > [!TIP]
 > Coming soon
@@ -41,7 +41,7 @@ from transformers import pipeline
 
 pipeline = pipeline(
     task="text-generation",
-    model="swiss-ai/Apertus-8B",
+    model="swiss-ai/SwissAI-8B",
     torch_dtype=torch.bfloat16,
     device=0
 )
@@ -56,10 +56,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(
-    "swiss-ai/Apertus-8B",
+    "swiss-ai/SwissAI-8B",
 )
 model = AutoModelForCausalLM.from_pretrained(
-    "swiss-ai/Apertus-8B",
+    "swiss-ai/SwissAI-8B",
     torch_dtype=torch.bfloat16,
     device_map="auto",
     attn_implementation="sdpa"
@@ -74,27 +74,27 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 <hfoption id="transformers CLI">
 
 ```bash
-echo -e "Plants create energy through a process known as" | transformers run --task text-generation --model swiss-ai/Apertus-8B --device 0
+echo -e "Plants create energy through a process known as" | transformers run --task text-generation --model swiss-ai/SwissAI-8B --device 0
 ```
 
 </hfoption>
 </hfoptions>
 
-## ApertusConfig
+## SwissAIConfig
 
-[[autodoc]] ApertusConfig
+[[autodoc]] SwissAIConfig
 
-## ApertusModel
+## SwissAIModel
 
-[[autodoc]] ApertusModel
+[[autodoc]] SwissAIModel
     - forward
 
-## ApertusForCausalLM
+## SwissAIForCausalLM
 
-[[autodoc]] ApertusForCausalLM
+[[autodoc]] SwissAIForCausalLM
     - forward
 
-## ApertusForTokenClassification
+## SwissAIForTokenClassification
 
-[[autodoc]] ApertusForTokenClassification
+[[autodoc]] SwissAIForTokenClassification
     - forward

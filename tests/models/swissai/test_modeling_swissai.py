@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Testing suite for the PyTorch Apertus model."""
+"""Testing suite for the PyTorch SwissAI model."""
 
 import unittest
 
@@ -42,38 +42,38 @@ if is_torch_available():
     import torch
 
     from transformers import (
-        ApertusConfig,
-        ApertusForCausalLM,
-        ApertusForTokenClassification,
-        ApertusModel,
+        SwissAIConfig,
+        SwissAIForCausalLM,
+        SwissAIForTokenClassification,
+        SwissAIModel,
     )
-    from transformers.models.apertus.modeling_apertus import ApertusRotaryEmbedding
+    from transformers.models.swissai.modeling_swissai import SwissAIRotaryEmbedding
 
 
-class ApertusModelTester(CausalLMModelTester):
+class SwissAIModelTester(CausalLMModelTester):
     if is_torch_available():
-        config_class = ApertusConfig
-        base_model_class = ApertusModel
-        causal_lm_class = ApertusForCausalLM
-        token_class = ApertusForTokenClassification
+        config_class = SwissAIConfig
+        base_model_class = SwissAIModel
+        causal_lm_class = SwissAIForCausalLM
+        token_class = SwissAIForTokenClassification
 
 
 @require_torch
-class ApertusModelTest(CausalLMModelTest, unittest.TestCase):
+class SwissAIModelTest(CausalLMModelTest, unittest.TestCase):
     all_model_classes = (
         (
-            ApertusModel,
-            ApertusForCausalLM,
-            ApertusForTokenClassification,
+            SwissAIModel,
+            SwissAIForCausalLM,
+            SwissAIForTokenClassification,
         )
         if is_torch_available()
         else ()
     )
     pipeline_model_mapping = (
         {
-            "feature-extraction": ApertusModel,
-            "text-generation": ApertusForCausalLM,
-            "token-classification": ApertusForTokenClassification,
+            "feature-extraction": SwissAIModel,
+            "text-generation": SwissAIForCausalLM,
+            "token-classification": SwissAIForTokenClassification,
         }
         if is_torch_available()
         else {}
@@ -81,20 +81,20 @@ class ApertusModelTest(CausalLMModelTest, unittest.TestCase):
     test_headmasking = False
     test_pruning = False
     fx_compatible = False  # Broken by attention refactor cc @Cyrilvallez
-    model_tester_class = ApertusModelTester
-    rotary_embedding_layer = ApertusRotaryEmbedding  # Enables RoPE tests if set
+    model_tester_class = SwissAIModelTester
+    rotary_embedding_layer = SwissAIRotaryEmbedding  # Enables RoPE tests if set
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
     model_split_percents = [0.5, 0.7, 0.8]
 
     # used in `test_torch_compile_for_training`
-    _torch_compile_train_cls = ApertusForCausalLM if is_torch_available() else None
+    _torch_compile_train_cls = SwissAIForCausalLM if is_torch_available() else None
 
 
 @require_torch_accelerator
 @require_read_token
-class ApertusIntegrationTest(unittest.TestCase):
+class SwissAIIntegrationTest(unittest.TestCase):
     def setup(self):
         cleanup(torch_device, gc_collect=True)
 
@@ -106,10 +106,10 @@ class ApertusIntegrationTest(unittest.TestCase):
         cleanup(torch_device, gc_collect=True)
 
     @slow
-    def test_apertus_8b_hard(self):
+    def test_swissai_8b_hard(self):
         """
-        An integration test for apertus 8b. It tests against a long output to ensure the subtle numerical differences
-        from apertus 8b's RoPE can be detected
+        An integration test for swissai 8b. It tests against a long output to ensure the subtle numerical differences
+        from swissai 8b's RoPE can be detected
         """
         expected_texts = Expectations(
             {
@@ -119,9 +119,9 @@ class ApertusIntegrationTest(unittest.TestCase):
         )  # fmt: skip
         EXPECTED_TEXT = expected_texts.get_expectation()
 
-        tokenizer = AutoTokenizer.from_pretrained("swiss-ai/Apertus-8B")
-        model = ApertusForCausalLM.from_pretrained(
-            "swiss-ai/Apertus-8B", device_map="auto", torch_dtype=torch.bfloat16
+        tokenizer = AutoTokenizer.from_pretrained("swiss-ai/SwissAI-8B")
+        model = SwissAIForCausalLM.from_pretrained(
+            "swiss-ai/SwissAI-8B", device_map="auto", torch_dtype=torch.bfloat16
         )
         input_text = ["Tell me about the french revolution."]
         model_inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
@@ -134,8 +134,8 @@ class ApertusIntegrationTest(unittest.TestCase):
     def test_model_8b_logits_bf16(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
 
-        model = ApertusForCausalLM.from_pretrained(
-            "swiss-ai/Apertus-8B", device_map="auto", torch_dtype=torch.bfloat16, attn_implementation="eager"
+        model = SwissAIForCausalLM.from_pretrained(
+            "swiss-ai/SwissAI-8B", device_map="auto", torch_dtype=torch.bfloat16, attn_implementation="eager"
         )
 
         with torch.no_grad():
@@ -182,8 +182,8 @@ class ApertusIntegrationTest(unittest.TestCase):
     def test_model_8b_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
 
-        model = ApertusForCausalLM.from_pretrained(
-            "swiss-ai/Apertus-8B", device_map="auto", torch_dtype=torch.bfloat16
+        model = SwissAIForCausalLM.from_pretrained(
+            "swiss-ai/SwissAI-8B", device_map="auto", torch_dtype=torch.bfloat16
         )
 
         with torch.no_grad():
@@ -240,9 +240,9 @@ class ApertusIntegrationTest(unittest.TestCase):
             "understanding of space and time."
         )
         prompt = "Simply put, the theory of relativity states that "
-        tokenizer = AutoTokenizer.from_pretrained("swiss-ai/Apertus-8B")
-        model = ApertusForCausalLM.from_pretrained(
-            "swiss-ai/Apertus-8B", device_map="sequential", torch_dtype=torch.bfloat16
+        tokenizer = AutoTokenizer.from_pretrained("swiss-ai/SwissAI-8B")
+        model = SwissAIForCausalLM.from_pretrained(
+            "swiss-ai/SwissAI-8B", device_map="sequential", torch_dtype=torch.bfloat16
         )
         model_inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
@@ -276,9 +276,9 @@ class ApertusIntegrationTest(unittest.TestCase):
             "Simply put, the theory of relativity states that ",
             "My favorite all time favorite condiment is ketchup.",
         ]
-        tokenizer = AutoTokenizer.from_pretrained("swiss-ai/Apertus-8B", pad_token="</s>", padding_side="right")
-        model = ApertusForCausalLM.from_pretrained(
-            "swiss-ai/Apertus-8B", device_map=torch_device, torch_dtype=torch.bfloat16
+        tokenizer = AutoTokenizer.from_pretrained("swiss-ai/SwissAI-8B", pad_token="</s>", padding_side="right")
+        model = SwissAIForCausalLM.from_pretrained(
+            "swiss-ai/SwissAI-8B", device_map=torch_device, torch_dtype=torch.bfloat16
         )
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
 
@@ -303,16 +303,16 @@ class ApertusIntegrationTest(unittest.TestCase):
             TorchExportableModuleWithStaticCache,
         )
 
-        apertus_models = {
-            "swiss-ai/Apertus-8B": [
+        swissai_models = {
+            "swiss-ai/SwissAI-8B": [
                 "Simply put, the theory of relativity states that 1) the speed of light is the same for all "
                 "observers, regardless of their location, and 2) the laws of physics are the same for all observers"
             ],
         }
 
-        for apertus_model_ckp, EXPECTED_TEXT_COMPLETION in apertus_models.items():
+        for swissai_model_ckp, EXPECTED_TEXT_COMPLETION in swissai_models.items():
             # Load tokenizer
-            tokenizer = AutoTokenizer.from_pretrained(apertus_model_ckp, pad_token="</s>", padding_side="right")
+            tokenizer = AutoTokenizer.from_pretrained(swissai_model_ckp, pad_token="</s>", padding_side="right")
             max_generation_length = tokenizer(EXPECTED_TEXT_COMPLETION, return_tensors="pt", padding=True)[
                 "input_ids"
             ].shape[-1]
@@ -323,8 +323,8 @@ class ApertusIntegrationTest(unittest.TestCase):
             cache_implementation = "static"
             attn_implementation = "sdpa"
             batch_size = 1
-            model = ApertusForCausalLM.from_pretrained(
-                apertus_model_ckp,
+            model = SwissAIForCausalLM.from_pretrained(
+                swissai_model_ckp,
                 device_map=device,
                 torch_dtype=dtype,
                 attn_implementation=attn_implementation,
@@ -365,10 +365,10 @@ class Mask4DTestHard(unittest.TestCase):
 
     def setUp(self):
         cleanup(torch_device, gc_collect=True)
-        model_name = "swiss-ai/Apertus-8B"
+        model_name = "swiss-ai/SwissAI-8B"
         self.model_dtype = torch.bfloat16
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = ApertusForCausalLM.from_pretrained(model_name, torch_dtype=self.model_dtype).to(torch_device)
+        self.model = SwissAIForCausalLM.from_pretrained(model_name, torch_dtype=self.model_dtype).to(torch_device)
 
     def get_test_data(self):
         template = "my favorite {}"
