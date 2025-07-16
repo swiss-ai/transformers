@@ -1,10 +1,32 @@
+# coding=utf-8
+# Copyright 2025 EleutherAI, the HuggingFace Inc. team, and the Swiss AI Initiative. All rights reserved.
+#
+# This code is based on HuggingFace's LLaMA implementation in this library.
+# It has been modified from its original forms to accommodate minor architectural
+# differences compared to LLaMA used by the Swiss AI Initiative that trained the model.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from ...configuration_utils import PretrainedConfig
 from ...modeling_rope_utils import rope_config_validation
+
 
 class SwissAIConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`SwissAIModel`]. It is used to instantiate a SwissAI
-    model according to the specified arguments, defining the model architecture.
+    model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
+    defaults will yield a similar configuration to that of the SwissAI-8B.
+    e.g. [swiss-ai/SwissAI-8B](https://huggingface.co/swiss-ai/SwissAI-8B)
+
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -113,7 +135,7 @@ class SwissAIConfig(PretrainedConfig):
         use_cache=True,
         pad_token_id=1,
         bos_token_id=None,
-        eos_token_id=131071, # TODO: what's our eos token id?
+        eos_token_id=131071,  # TODO: what's our eos token id?
         tie_word_embeddings=False,
         rope_theta=500000.0,
         rope_scaling=None,
@@ -121,7 +143,7 @@ class SwissAIConfig(PretrainedConfig):
         attention_dropout=0.0,
         rms_norm_eps=1e-5,
         qk_norm=True,
-        post_norm=False,        
+        post_norm=False,
         **kwargs,
     ):
         super().__init__(

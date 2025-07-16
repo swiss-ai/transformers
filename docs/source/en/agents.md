@@ -13,7 +13,10 @@ specific language governing permissions and limitations under the License.
 rendered properly in your Markdown viewer.
 
 -->
-# Agents and tools
+
+# Agents
+
+(deprecated)
 
 > [!WARNING]
-> This subpackage will soon be deprecated, since it has ben spun off into [smolagents](https://huggingface.co/docs/smolagents/index). Smolagents has extended functionality, and a similar API.
+> Agents and tools were spun out into the standalone [smolagents](https://huggingface.co/docs/smolagents/index) library. They were removed from `transformers` in v4.52.
