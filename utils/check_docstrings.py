@@ -49,7 +49,7 @@ from check_repo import ignore_undocumented
 from git import Repo
 
 from transformers.utils import direct_transformers_import
-from transformers.utils.args_doc import (
+from transformers.utils.auto_docstring import (
     ImageProcessorArgs,
     ModelArgs,
     ModelOutputArgs,
@@ -80,6 +80,8 @@ ALWAYS_OVERRIDE = ["labels"]
 # line before the docstring.
 OBJECTS_TO_IGNORE = [
     "SwissAIConfig",
+    "Mxfp4Config",
+    "Exaone4Config",
     "SmolLM3Config",
     "Gemma3nVisionConfig",
     "Llama4Processor",
@@ -913,7 +915,7 @@ def match_docstring_with_signature(obj: Any) -> Optional[tuple[str, str]]:
         missing = set(signature.keys()) - set(old_arguments)
         new_param_docs.extend([arguments[name] for name in missing if len(arguments[name]) > 0])
     else:
-        new_param_docs = [arguments[name] for name in signature.keys() if len(arguments[name]) > 0]
+        new_param_docs = [arguments[name] for name in signature if len(arguments[name]) > 0]
     new_doc_arg = "\n".join(new_param_docs)
 
     return old_doc_arg, new_doc_arg
@@ -1488,7 +1490,7 @@ def check_auto_docstrings(overwrite: bool = False, check_all: bool = False):
         if docstring_args_ro_remove_warnings:
             if not overwrite:
                 print(
-                    "Some docstrings are redundant with the ones in `args_doc.py` and will be removed. Run `make fix-copies` or `python utils/check_docstrings.py --fix_and_overwrite` to remove the redundant docstrings."
+                    "Some docstrings are redundant with the ones in `auto_docstring.py` and will be removed. Run `make fix-copies` or `python utils/check_docstrings.py --fix_and_overwrite` to remove the redundant docstrings."
                 )
             print(f"🚨 Redundant docstring for the following arguments in {candidate_file}:")
             for warning in docstring_args_ro_remove_warnings:
