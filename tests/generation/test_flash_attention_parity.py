@@ -80,7 +80,7 @@ class FlashAttentionParityTest(unittest.TestCase):
     @require_flash_attn_3
     @slow
     def test_flash_attention_2_3_parity(self):
-        model_id = "meta-llama/Llama-3.2-1B-Instruct"
+        model_id = "/capstor/store/cscs/swissai/infra01/swiss-alignment/checkpoints/Apertus3-8B_iter_1678000-tulu3-sft/checkpoint-13446"
         prompt = "The ETH AI Center is"
 
         # 1. Load FA2 model and tokenizer

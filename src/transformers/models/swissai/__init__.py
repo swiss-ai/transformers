@@ -23,8 +23,8 @@ from ...utils.import_utils import define_import_structure
 
 
 if TYPE_CHECKING:
-    from .configuration_apertus import *
-    from .modeling_apertus import *
+    from .configuration_swissai import *
+    from .modeling_swissai import *
 else:
     import sys
 

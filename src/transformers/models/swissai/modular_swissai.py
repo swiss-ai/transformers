@@ -44,12 +44,12 @@ from ..llama.modeling_llama import (
 logger = logging.get_logger(__name__)
 
 
-class ApertusConfig(LlamaConfig):
+class SwissAIConfig(LlamaConfig):
     r"""
-    This is the configuration class to store the configuration of a [`ApertusModel`]. It is used to instantiate a Apertus
+    This is the configuration class to store the configuration of a [`SwissAIModel`]. It is used to instantiate a SwissAI
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
-    defaults will yield a similar configuration to that of the Apertus-8B.
-    e.g. [swiss-ai/Apertus-8B](https://huggingface.co/swiss-ai/Apertus-8B)
+    defaults will yield a similar configuration to that of the SwissAI-8B.
+    e.g. [swiss-ai/SwissAI-8B](https://huggingface.co/swiss-ai/SwissAI-8B)
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
@@ -57,8 +57,8 @@ class ApertusConfig(LlamaConfig):
 
     Args:
         vocab_size (`int`, *optional*, defaults to 131072):
-            Vocabulary size of the Apertus model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`ApertusModel`]
+            Vocabulary size of the SwissAI model. Defines the number of different tokens that can be represented by the
+            `inputs_ids` passed when calling [`SwissAIModel`]
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
         intermediate_size (`int`, *optional*, defaults to 14336):
@@ -78,7 +78,7 @@ class ApertusConfig(LlamaConfig):
         hidden_act (`str` or `function`, *optional*, defaults to `"xielu"`):
             The non-linear activation function (function or string) in the decoder.
         max_position_embeddings (`int`, *optional*, defaults to 65536):
-            The maximum sequence length that this model might ever be used with. Apertus supports up to 65536 tokens.
+            The maximum sequence length that this model might ever be used with. SwissAI supports up to 65536 tokens.
         initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
         rms_norm_eps (`float`, *optional*, defaults to 1e-05):
@@ -143,19 +143,19 @@ class ApertusConfig(LlamaConfig):
             Whether to use a normalization on the output of the attention layer.
 
     ```python
-    >>> from transformers import ApertusModel, ApertusConfig
+    >>> from transformers import SwissAIModel, SwissAIConfig
 
-    >>> # Initializing a Apertus-8B style configuration
-    >>> configuration = ApertusConfig()
+    >>> # Initializing a SwissAI-8B style configuration
+    >>> configuration = SwissAIConfig()
 
-    >>> # Initializing a model from the Apertus-8B style configuration
-    >>> model = ApertusModel(configuration)
+    >>> # Initializing a model from the SwissAI-8B style configuration
+    >>> model = SwissAIModel(configuration)
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
 
-    model_type = "apertus"
+    model_type = "swissai"
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise_rep",  # we need to replicate here due to the added norm on q and k
         "layers.*.self_attn.k_proj": "colwise_rep",  # we need to replicate here due to the added norm on q and k
@@ -226,7 +226,7 @@ class ApertusConfig(LlamaConfig):
         del self.head_dim
 
 
-class ApertusMLP(nn.Module):
+class SwissAIMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -247,20 +247,20 @@ class ApertusMLP(nn.Module):
         return down_proj
 
 
-class ApertusRMSNorm(LlamaRMSNorm):
+class SwissAIRMSNorm(LlamaRMSNorm):
     pass
 
 
-class ApertusRotaryEmbedding(LlamaRotaryEmbedding):
+class SwissAIRotaryEmbedding(LlamaRotaryEmbedding):
     pass
 
 
-class ApertusAttention(LlamaAttention):
-    def __init__(self, config: ApertusConfig, layer_idx: Optional[int] = None):
+class SwissAIAttention(LlamaAttention):
+    def __init__(self, config: SwissAIConfig, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
         if self.config.qk_norm:
-            self.q_norm = ApertusRMSNorm(self.head_dim, config.rms_norm_eps)
-            self.k_norm = ApertusRMSNorm(self.head_dim, config.rms_norm_eps)
+            self.q_norm = SwissAIRMSNorm(self.head_dim, config.rms_norm_eps)
+            self.k_norm = SwissAIRMSNorm(self.head_dim, config.rms_norm_eps)
         else:
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
@@ -310,11 +310,11 @@ class ApertusAttention(LlamaAttention):
         return attn_output, attn_weights
 
 
-class ApertusDecoderLayer(LlamaDecoderLayer):
-    def __init__(self, config: ApertusConfig, layer_idx: int):
+class SwissAIDecoderLayer(LlamaDecoderLayer):
+    def __init__(self, config: SwissAIConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.attention_layernorm = ApertusRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.feedforward_layernorm = ApertusRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attention_layernorm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.feedforward_layernorm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.post_norm = config.post_norm
 
@@ -360,11 +360,11 @@ class ApertusDecoderLayer(LlamaDecoderLayer):
         return hidden_states
 
 
-class ApertusPreTrainedModel(LlamaPreTrainedModel):
+class SwissAIPreTrainedModel(LlamaPreTrainedModel):
     pass
 
 
-class ApertusForCausalLM(LlamaForCausalLM):
+class SwissAIForCausalLM(LlamaForCausalLM):
     def forward(self, **super_kwargs):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -375,10 +375,10 @@ class ApertusForCausalLM(LlamaForCausalLM):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, ApertusForCausalLM
+        >>> from transformers import AutoTokenizer, SwissAIForCausalLM
 
-        >>> model = ApertusForCausalLM.from_pretrained("swiss-ai/Apertus-8B")
-        >>> tokenizer = AutoTokenizer.from_pretrained("swiss-ai/Apertus-8B")
+        >>> model = SwissAIForCausalLM.from_pretrained("swiss-ai/SwissAI-8B")
+        >>> tokenizer = AutoTokenizer.from_pretrained("swiss-ai/SwissAI-8B")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
@@ -393,18 +393,18 @@ class ApertusForCausalLM(LlamaForCausalLM):
     pass
 
 
-class ApertusForTokenClassification(LlamaForTokenClassification):
+class SwissAIForTokenClassification(LlamaForTokenClassification):
     pass
 
 
-class ApertusModel(LlamaModel):
+class SwissAIModel(LlamaModel):
     pass
 
 
 __all__ = [
-    "ApertusConfig",
-    "ApertusForCausalLM",
-    "ApertusForTokenClassification",
-    "ApertusModel",
-    "ApertusPreTrainedModel",
+    "SwissAIConfig",
+    "SwissAIForCausalLM",
+    "SwissAIForTokenClassification",
+    "SwissAIModel",
+    "SwissAIPreTrainedModel",
 ]
