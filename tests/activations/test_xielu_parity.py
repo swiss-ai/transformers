@@ -44,15 +44,18 @@ class XIELUParityTest(unittest.TestCase):
             rouge_l_scores.append(fmeasure)
         return rouge_l_scores
 
-    def _benchmark_generation(self, model, inputs, max_new_tokens=20, n_warmup=3, n_runs=5):
+    @torch.no_grad()
+    def _benchmark_generation(self, model, inputs, max_new_tokens=20, n_warmup=1, n_runs=5):
         """
         Benchmark generation latency for a given max_new_tokens.
         """
+        model.eval()
         for _ in range(n_warmup):
             model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, eos_token_id=None)
         torch.cuda.synchronize()
         start_time = torch.cuda.Event(enable_timing=True)
         end_time = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
         start_time.record()
         for _ in range(n_runs):
             model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, eos_token_id=None)
@@ -81,27 +84,32 @@ class XIELUParityTest(unittest.TestCase):
             pytest.skip(f"CUDA-fused xIELU not available, skipping test. Error: {e}\n"
 						"For CUDA xIELU (experimental), `pip install git+https://github.com/nickjbrowning/XIELU`")
 
-        # Load model with vector loads enabled
-        ACT2FN["xielu"] = (XIELUActivation, {"with_vector_loads": True})
-        model_vl = SwissAIForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.bfloat16).to("cuda")
-
         # Load model with vector loads disabled
         ACT2FN["xielu"] = XIELUActivation
         model_nv = SwissAIForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.bfloat16).to("cuda")
 
+        # Load model with vector loads enabled
+        ACT2FN["xielu"] = (XIELUActivation, {"with_vector_loads": True})
+        model_vl = SwissAIForCausalLM.from_pretrained(model_id, config=config, torch_dtype=torch.bfloat16).to("cuda")
+
+        # Compile models if supported by torch
+        if hasattr(torch, "compile"):
+            model_nv = torch.compile(model_nv)
+            model_vl = torch.compile(model_vl)
+
         # Generate with both models
         with torch.no_grad():
-            output_vl = model_vl.generate(
-                **inputs, max_new_tokens=20, do_sample=False, output_scores=True, return_dict_in_generate=True, eos_token_id=None
-            )
             output_nv = model_nv.generate(
                 **inputs, max_new_tokens=20, do_sample=False, output_scores=True, return_dict_in_generate=True, eos_token_id=None
             )
+            output_vl = model_vl.generate(
+                **inputs, max_new_tokens=20, do_sample=False, output_scores=True, return_dict_in_generate=True, eos_token_id=None
+            )
         # Decode outputs
-        logits_vl = torch.stack(output_vl.scores)
         logits_nv = torch.stack(output_nv.scores)
-        text_vl = tokenizer.decode(output_vl.sequences[0], skip_special_tokens=True)
+        logits_vl = torch.stack(output_vl.scores)
         text_nv = tokenizer.decode(output_nv.sequences[0], skip_special_tokens=True)
+        text_vl = tokenizer.decode(output_vl.sequences[0], skip_special_tokens=True)
 
         # Parity check (deferred failure)
         parity_er = None
@@ -115,25 +123,25 @@ class XIELUParityTest(unittest.TestCase):
         rouge_score = self._calculate_rouge_l([text_vl], [text_nv])[0]
 
         # Benchmark generation
-        time_vl_20 = self._benchmark_generation(model_vl, inputs, max_new_tokens=20)
         time_nv_20 = self._benchmark_generation(model_nv, inputs, max_new_tokens=20)
+        time_vl_20 = self._benchmark_generation(model_vl, inputs, max_new_tokens=20)
         if run_1k:
-            time_vl_1k = self._benchmark_generation(model_vl, inputs, max_new_tokens=1024)
             time_nv_1k = self._benchmark_generation(model_nv, inputs, max_new_tokens=1024)
+            time_vl_1k = self._benchmark_generation(model_vl, inputs, max_new_tokens=1024)
         else:
-            time_vl_1k = None
             time_nv_1k = None
+            time_vl_1k = None
 
         # Update metrics for pytest summary
         XIELU_METRICS.update({
             "Prompt": prompt,
-            "Text (with vector loads)": text_vl,
             "Text (no vector loads)": text_nv,
+            "Text (with vector loads)": text_vl,
             "ROUGE-L": f"{rouge_score:.4f}",
-            "lat_vl_20": time_vl_20,
             "lat_nv_20": time_nv_20,
-            "lat_vl_1k": time_vl_1k,
+            "lat_vl_20": time_vl_20,
             "lat_nv_1k": time_nv_1k,
+            "lat_vl_1k": time_vl_1k,
         })
         # Final parity failure (marks test as failed after metrics recorded)
         if parity_er:

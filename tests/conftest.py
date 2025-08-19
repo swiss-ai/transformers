@@ -22,16 +22,16 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     terminalreporter.ensure_newline()
     terminalreporter.write_sep("=", "XIELU Parity Summary")
     terminalreporter.write_line(f"Prompt: {metrics['Prompt']}")
-    terminalreporter.write_line(f"Text ✓ VL: {metrics['Text (with vector loads)']}")
     terminalreporter.write_line(f"Text ✗ VL: {metrics['Text (no vector loads)']}")
+    terminalreporter.write_line(f"Text ✓ VL: {metrics['Text (with vector loads)']}")
     terminalreporter.write_line(f"ROUGE-L: {metrics['ROUGE-L']}")
 
     # Latencies
-    lat_vl_20 = metrics['lat_vl_20']
     lat_nv_20 = metrics['lat_nv_20']
+    lat_vl_20 = metrics['lat_vl_20']
     # 1k latencies may be None if --1k not passed
-    lat_vl_1k = metrics.get('lat_vl_1k')
     lat_nv_1k = metrics.get('lat_nv_1k')
+    lat_vl_1k = metrics.get('lat_vl_1k')
     # Compute speedup for 20-token
     su20 = lat_nv_20 / lat_vl_20
     # Compute speedup for 1k-token if data present
