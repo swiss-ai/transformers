@@ -24,9 +24,9 @@ from ...configuration_utils import PretrainedConfig
 from ...modeling_rope_utils import rope_config_validation
 
 
-class SwissAIConfig(PretrainedConfig):
+class ApertusConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`SwissAIModel`]. It is used to instantiate a SwissAI
+    This is the configuration class to store the configuration of a [`ApertusModel`]. It is used to instantiate a Apertus
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the Apertus-8B.
     e.g. [swiss-ai/Apertus-8B](https://huggingface.co/swiss-ai/Apertus-8B)
@@ -119,7 +119,7 @@ class SwissAIConfig(PretrainedConfig):
             The dropout ratio for the attention probabilities.
 
     ```python
-    >>> from transformers import SwissAIModel, SwissAIConfig
+    >>> from transformers import ApertusModel, ApertusConfig
 
     >>> # Initializing a Apertus-8B style configuration
     >>> configuration = ApertusConfig()
@@ -131,7 +131,7 @@ class SwissAIConfig(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "swissai"
+    model_type = "apertus"
     keys_to_ignore_at_inference = ["past_key_values"]
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise_rep",  # we need to replicate here due to the added norm on q and k
@@ -211,4 +211,4 @@ class SwissAIConfig(PretrainedConfig):
         rope_config_validation(self)
 
 
-__all__ = ["SwissAIConfig"]
+__all__ = ["ApertusConfig"]

@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Testing suite for the PyTorch SwissAI model."""
+"""Testing suite for the PyTorch Apertus model."""
 
 import unittest
 
@@ -37,38 +37,38 @@ if is_torch_available():
     import torch
 
     from transformers import (
-        SwissAIConfig,
-        SwissAIForCausalLM,
-        SwissAIForTokenClassification,
-        SwissAIModel,
+        ApertusConfig,
+        ApertusForCausalLM,
+        ApertusForTokenClassification,
+        ApertusModel,
     )
-    from transformers.models.swissai.modeling_swissai import SwissAIRotaryEmbedding
+    from transformers.models.apertus.modeling_apertus import ApertusRotaryEmbedding
 
 
-class SwissAIModelTester(CausalLMModelTester):
+class ApertusModelTester(CausalLMModelTester):
     if is_torch_available():
-        config_class = SwissAIConfig
-        base_model_class = SwissAIModel
-        causal_lm_class = SwissAIForCausalLM
-        token_class = SwissAIForTokenClassification
+        config_class = ApertusConfig
+        base_model_class = ApertusModel
+        causal_lm_class = ApertusForCausalLM
+        token_class = ApertusForTokenClassification
 
 
 @require_torch
-class SwissAIModelTest(CausalLMModelTest, unittest.TestCase):
+class ApertusModelTest(CausalLMModelTest, unittest.TestCase):
     all_model_classes = (
         (
-            SwissAIModel,
-            SwissAIForCausalLM,
-            SwissAIForTokenClassification,
+            ApertusModel,
+            ApertusForCausalLM,
+            ApertusForTokenClassification,
         )
         if is_torch_available()
         else ()
     )
     pipeline_model_mapping = (
         {
-            "feature-extraction": SwissAIModel,
-            "text-generation": SwissAIForCausalLM,
-            "token-classification": SwissAIForTokenClassification,
+            "feature-extraction": ApertusModel,
+            "text-generation": ApertusForCausalLM,
+            "token-classification": ApertusForTokenClassification,
         }
         if is_torch_available()
         else {}
@@ -76,15 +76,15 @@ class SwissAIModelTest(CausalLMModelTest, unittest.TestCase):
     test_headmasking = False
     test_pruning = False
     fx_compatible = False  # Broken by attention refactor cc @Cyrilvallez
-    model_tester_class = SwissAIModelTester
-    rotary_embedding_layer = SwissAIRotaryEmbedding  # Enables RoPE tests if set
+    model_tester_class = ApertusModelTester
+    rotary_embedding_layer = ApertusRotaryEmbedding  # Enables RoPE tests if set
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
     model_split_percents = [0.5, 0.7, 0.8]
 
     # used in `test_torch_compile_for_training`
-    _torch_compile_train_cls = SwissAIForCausalLM if is_torch_available() else None
+    _torch_compile_train_cls = ApertusForCausalLM if is_torch_available() else None
 
 
 @require_torch_accelerator
@@ -102,10 +102,10 @@ class Mask4DTestHard(unittest.TestCase):
 
     def setUp(self):
         cleanup(torch_device, gc_collect=True)
-        model_name = "swiss-ai/SwissAI-8B"
+        model_name = "swiss-ai/Apertus-8B"
         self.model_dtype = torch.bfloat16
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = SwissAIForCausalLM.from_pretrained(model_name, torch_dtype=self.model_dtype).to(torch_device)
+        self.model = ApertusForCausalLM.from_pretrained(model_name, torch_dtype=self.model_dtype).to(torch_device)
 
     def get_test_data(self):
         template = "my favorite {}"

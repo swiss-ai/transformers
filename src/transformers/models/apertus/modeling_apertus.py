@@ -55,10 +55,10 @@ class ApertusMLP(nn.Module):
 
 
 @use_kernel_forward_from_hub("RMSNorm")
-class SwissAIRMSNorm(nn.Module):
+class ApertusRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
-        SwissAIRMSNorm is equivalent to T5LayerNorm
+        ApertusRMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -183,10 +183,10 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
-class SwissAIAttention(nn.Module):
+class ApertusAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: SwissAIConfig, layer_idx: Optional[int] = None):
+    def __init__(self, config: ApertusConfig, layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -257,16 +257,16 @@ class SwissAIAttention(nn.Module):
         return attn_output, attn_weights
 
 
-class SwissAIDecoderLayer(GradientCheckpointingLayer):
-    def __init__(self, config: SwissAIConfig, layer_idx: int):
+class ApertusDecoderLayer(GradientCheckpointingLayer):
+    def __init__(self, config: ApertusConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = SwissAIAttention(config=config, layer_idx=layer_idx)
+        self.self_attn = ApertusAttention(config=config, layer_idx=layer_idx)
 
-        self.mlp = SwissAIMLP(config)
-        self.attention_layernorm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.feedforward_layernorm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = ApertusMLP(config)
+        self.attention_layernorm = ApertusRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.feedforward_layernorm = ApertusRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -307,7 +307,7 @@ class ApertusPreTrainedModel(PreTrainedModel):
     config: ApertusConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["SwissAIDecoderLayer"]
+    _no_split_modules = ["ApertusDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = True
     _supports_sdpa = True
@@ -316,24 +316,24 @@ class ApertusPreTrainedModel(PreTrainedModel):
     _can_compile_fullgraph = True
     _supports_attention_backend = True
     _can_record_outputs = {
-        "hidden_states": SwissAIDecoderLayer,
-        "attentions": SwissAIAttention,
+        "hidden_states": ApertusDecoderLayer,
+        "attentions": ApertusAttention,
     }
 
 
 @auto_docstring
-class SwissAIModel(SwissAIPreTrainedModel):
-    def __init__(self, config: SwissAIConfig):
+class ApertusModel(ApertusPreTrainedModel):
+    def __init__(self, config: ApertusConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [SwissAIDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [ApertusDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = SwissAIRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = SwissAIRotaryEmbedding(config=config)
+        self.norm = ApertusRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = ApertusRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
@@ -401,14 +401,14 @@ class SwissAIModel(SwissAIPreTrainedModel):
 
 
 @auto_docstring
-class SwissAIForCausalLM(SwissAIPreTrainedModel, GenerationMixin):
+class ApertusForCausalLM(ApertusPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = SwissAIModel(config)
+        self.model = ApertusModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -445,10 +445,10 @@ class SwissAIForCausalLM(SwissAIPreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, SwissAIForCausalLM
+        >>> from transformers import AutoTokenizer, ApertusForCausalLM
 
-        >>> model = SwissAIForCausalLM.from_pretrained("swiss-ai/SwissAI-8B")
-        >>> tokenizer = AutoTokenizer.from_pretrained("swiss-ai/SwissAI-8B")
+        >>> model = ApertusForCausalLM.from_pretrained("swiss-ai/Apertus-8B")
+        >>> tokenizer = AutoTokenizer.from_pretrained("swiss-ai/Apertus-8B")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
