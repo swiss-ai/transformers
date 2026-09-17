@@ -383,7 +383,7 @@ class PPDocLayoutV2PositionRelationEmbedding(nn.Module):
     inv_freq: torch.Tensor
 
     @deprecate_kwarg("device", version="5.18")
-    def __init__(self, config, device=None):
+    def __init__(self, config: PPDocLayoutV2Config, device=None):
         super().__init__()
         self.config = config
         self.embed_dim = config.relation_bias_embed_dim
@@ -392,7 +392,7 @@ class PPDocLayoutV2PositionRelationEmbedding(nn.Module):
             in_channels=self.embed_dim * 4, out_channels=config.num_attention_heads, kernel_size=1
         )
         inv_freq, self.attention_scaling = self.compute_default_rope_parameters(config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
 
     @staticmethod
     @deprecate_kwarg("device", version="5.18")
@@ -636,7 +636,7 @@ class PPDocLayoutV2PreTrainedModel(RTDetrPreTrainedModel):
             init.copy_(module.position_ids, torch.arange(module.position_ids.shape[-1]).expand((1, -1)))
         if isinstance(module, PPDocLayoutV2PositionRelationEmbedding):
             inv_freq, _ = module.compute_default_rope_parameters(module.config)
-            module.register_buffer("inv_freq", inv_freq, persistent=False)
+            init.copy_(module.inv_freq, inv_freq)
 
 
 @auto_docstring(
@@ -864,11 +864,11 @@ class PPDocLayoutV2ForObjectDetection(RTDetrForObjectDetection):
         ```python
         >>> from transformers import AutoModelForObjectDetection, AutoImageProcessor
         >>> from PIL import Image
-        >>> import httpx
+        >>> from huggingface_hub.utils import httpx
         >>> from io import BytesIO
         >>> import torch
 
-        >>> url = "https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/layout_demo.jpg"
+        >>> url = "https://huggingface.co/datasets/hf-internal-testing/transformers-synthetic-assets/resolve/main/images/paddle_layout_demo.jpg"
         >>> with httpx.stream("GET", url) as response:
         ...     image = Image.open(BytesIO(response.read()))
 

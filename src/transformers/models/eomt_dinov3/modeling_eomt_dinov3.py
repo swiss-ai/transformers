@@ -19,7 +19,7 @@
 # limitations under the License.
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -402,13 +402,18 @@ class EomtDinov3RotaryEmbedding(nn.Module):
             raise ValueError("`EomtDinov3` only supports `default` RoPE! Please check your `rope_type`")
         inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
 
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
+        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
+        self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
 
     def forward(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         _, _, height, width = pixel_values.shape
-        num_patches_h = height // self.config.patch_size
-        num_patches_w = width // self.config.patch_size
+        patch_height, patch_width = (
+            self.config.patch_size
+            if isinstance(self.config.patch_size, Iterable)
+            else (self.config.patch_size, self.config.patch_size)
+        )
+        num_patches_h = height // patch_height
+        num_patches_w = width // patch_width
 
         device = pixel_values.device
         device_type = device.type if isinstance(device.type, str) and device.type != "mps" else "cpu"
@@ -721,7 +726,7 @@ class EomtDinov3Loss(nn.Module):
         self.eos_coef = config.no_object_weight
         empty_weight = torch.ones(self.num_labels + 1)
         empty_weight[-1] = self.eos_coef
-        self.register_buffer("empty_weight", empty_weight)
+        self.empty_weight = nn.Buffer(empty_weight)
 
         # pointwise mask loss parameters
         self.num_points = config.train_num_points
@@ -1188,7 +1193,7 @@ class EomtDinov3ForUniversalSegmentation(EomtDinov3PreTrainedModel):
 
         self.criterion = EomtDinov3Loss(config=config, weight_dict=self.weight_dict)
 
-        self.register_buffer("attn_mask_probs", torch.ones(config.num_blocks))
+        self.attn_mask_probs = nn.Buffer(torch.ones(config.num_blocks))
 
         self.num_prefix_tokens = 1 + config.num_register_tokens
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
