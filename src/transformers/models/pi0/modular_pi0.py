@@ -163,6 +163,8 @@ class PI0Processor(ProcessorMixin):
         padded_pixel_values = torch.zeros(len(batched_images), max_num_cameras, 3, self.height, self.width)
 
         for batch, sample_images in enumerate(batched_images):
+            if not sample_images:
+                continue
             processed = self.image_processor(sample_images, return_tensors="pt", **output_kwargs["images_kwargs"])
 
             num_cameras = len(sample_images)
@@ -321,7 +323,7 @@ class PI0TimestepEmbeddings(nn.Module):
         super().__init__()
         self.config = config
         sinusoid_freq = self.compute_freqs(config)
-        self.register_buffer("sinusoid_freq", sinusoid_freq, persistent=False)
+        self.sinusoid_freq = nn.Buffer(sinusoid_freq, persistent=False)
 
     @staticmethod
     def compute_freqs(config):
@@ -539,7 +541,7 @@ class PI0ForConditionalGeneration(PI0PreTrainedModel):
         pixel_attention_mask (`torch.Tensor`, *optional*):
             The mask indicating padded positions in the input image.
         actions (`torch.Tensor`, *optional*):
-            Input actions that need to be predicted. Used only when training to compiute loss.
+            Input actions that need to be predicted. Used only when training to compute loss.
         """
         batch_size = state.shape[0]
 
