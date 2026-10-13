@@ -128,9 +128,8 @@ class TimesFmPositionalEmbedding(nn.Module):
 
         num_timescales = self.embedding_dims // 2
         log_timescale_increment = math.log(float(max_timescale) / float(min_timescale)) / max(num_timescales - 1, 1)
-        self.register_buffer(
-            "inv_timescales",
-            min_timescale * torch.exp(torch.arange(num_timescales, dtype=torch.float32) * -log_timescale_increment),
+        self.inv_timescales = nn.Buffer(
+            min_timescale * torch.exp(torch.arange(num_timescales, dtype=torch.float32) * -log_timescale_increment)
         )
 
     def forward(self, seq_length=None, position=None):
@@ -754,13 +753,10 @@ class TimesFmModelForPrediction(TimesFmPreTrainedModel):
 
     @staticmethod
     def _timesfm_moving_average(arr: torch.Tensor, window_size: int) -> list[torch.Tensor]:
-        """Calculates the moving average using PyTorch's convolution function."""
+        """Calculates the moving average over a sliding window."""
         # Pad with zeros to handle initial window positions
         arr_padded = F.pad(arr, (window_size - 1, 0), "constant", 0)
-        # Create a convolution kernel
-        kernel = torch.ones(window_size, dtype=arr.dtype, device=arr.device) / window_size
-        # Apply convolution to calculate the moving average
-        smoothed_arr = F.conv1d(arr_padded.view(1, 1, -1), kernel.view(1, 1, -1)).squeeze()
+        smoothed_arr = arr_padded.unfold(-1, window_size, 1).mean(dim=-1)
         return [smoothed_arr, arr - smoothed_arr]
 
 

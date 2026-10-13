@@ -22,7 +22,7 @@ from typing import Any, TypeVar
 
 from ...configuration_utils import PreTrainedConfig
 from ...dynamic_module_utils import get_class_from_dynamic_module, resolve_trust_remote_code
-from ...utils import CONFIG_NAME, logging
+from ...utils import CONFIG_NAME, logging, resolve_revision
 from .auto_mappings import CONFIG_MAPPING_NAMES, SPECIAL_MODEL_TYPE_TO_MODULE_NAME
 
 
@@ -40,6 +40,7 @@ CONFIG_MAPPING_NAMES.update(
         "parakeet_tdt": "ParakeetTDTConfig",
         "vibevoice_acoustic_tokenizer_decoder": "VibeVoiceAcousticTokenizerDecoderConfig",
         "vibevoice_acoustic_tokenizer_encoder": "VibeVoiceAcousticTokenizerEncoderConfig",
+        "wavtokenizer_encoder": "WavTokenizerEncoderConfig",
     }
 )
 
@@ -53,6 +54,7 @@ SPECIAL_MODEL_TYPE_TO_MODULE_NAME.update(
         "parakeet_tdt": "parakeet",
         "vibevoice_acoustic_tokenizer_encoder": "vibevoice_acoustic_tokenizer",
         "vibevoice_acoustic_tokenizer_decoder": "vibevoice_acoustic_tokenizer",
+        "wavtokenizer_encoder": "wavtokenizer",
     }
 )
 
@@ -384,6 +386,15 @@ class AutoConfig:
         kwargs["name_or_path"] = pretrained_model_name_or_path
         trust_remote_code = kwargs.pop("trust_remote_code", None)
         code_revision = kwargs.pop("code_revision", None)
+
+        # Resolve the revision once, so the config and the remote code below come from the same repository state.
+        kwargs["revision"] = resolve_revision(
+            pretrained_model_name_or_path,
+            kwargs.get("revision"),
+            token=kwargs.get("token"),
+            local_files_only=kwargs.get("local_files_only", False),
+            cache_dir=kwargs.get("cache_dir"),
+        )
 
         config_dict, unused_kwargs = PreTrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
         has_remote_code = "auto_map" in config_dict and "AutoConfig" in config_dict["auto_map"]
