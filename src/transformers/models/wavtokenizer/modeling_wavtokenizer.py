@@ -635,7 +635,7 @@ class WavTokenizerModel(WavTokenizerPreTrainedModel):
         padding_mask (`torch.Tensor` of shape `(batch_size, sequence_length)` or `(batch_size, 1, sequence_length)`, *optional*):
             Mask describing padding in `input_values`; used to compute `audio_codes_mask`.
         """
-        return self.encoder_model.encode(input_values, padding_mask=padding_mask, **kwargs)
+        return self.encoder_model.encode(input_values, padding_mask=padding_mask, return_dict=True, **kwargs)
 
     @auto_docstring
     @can_return_tuple
