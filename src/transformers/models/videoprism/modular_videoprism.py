@@ -413,10 +413,10 @@ class VideoPrismTextEmbeddings(nn.Module):
         self.config = config
         embed_dim = config.hidden_size
         self.token_embedding = nn.Embedding(config.vocab_size, embed_dim)
-        self.register_buffer(
-            "position_embedding", create_sinusoidal_positions(config.max_position_embeddings, config.hidden_size)
+        self.position_embedding = nn.Buffer(
+            create_sinusoidal_positions(config.max_position_embeddings, config.hidden_size)
         )
-        self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
+        self.position_ids = nn.Buffer(torch.arange(config.max_position_embeddings).expand((1, -1)))
         self.cls_emb = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.scaling = config.hidden_size**0.5
 
@@ -513,7 +513,6 @@ class VideoPrismPreTrainedModel(VivitPreTrainedModel):
         "VideoPrismMultiheadAttentionPoolingHead",
     ]
     # sdpa is disabled because it does not support attention capping
-    # used in eager and logits are too far off
     _supports_sdpa = False
     _input_embed_layer = AttributeError()
 
@@ -556,7 +555,7 @@ class VideoPrismPreTrainedModel(VivitPreTrainedModel):
 class VideoPrismVisionModel(VideoPrismPreTrainedModel):
     config: VideoPrismVisionConfig
     input_modalities = ("video",)
-    base_model_prefix = "model"
+    base_model_prefix = "vision_model"
 
     def __init__(self, config: VideoPrismVisionConfig):
         super().__init__(config)
@@ -670,7 +669,7 @@ class VideoPrismMultiheadAttentionPoolingHead(VivitAttention):
 class VideoPrismTextModel(VideoPrismPreTrainedModel):
     config: VideoPrismTextConfig
     input_modalities = ("text",)
-    base_model_prefix = "model"
+    base_model_prefix = "text_model"
     main_input_name = "input_ids"
     _no_split_modules = ["VideoPrismTextEmbeddings", "VideoPrismLayer"]
     _input_embed_layer = "token_embedding"
@@ -728,6 +727,7 @@ class VideoPrismTextModel(VideoPrismPreTrainedModel):
 )
 class VideoPrismVideoModel(VideoPrismPreTrainedModel):
     config: VideoPrismVisionConfig
+    base_model_prefix = "vision_model"
 
     def __init__(self, config: VideoPrismVisionConfig):
         super().__init__(config)
@@ -909,7 +909,7 @@ class VideoPrismClipModel(VideoPrismPreTrainedModel):
 class VideoPrismForVideoClassification(VideoPrismPreTrainedModel):
     config: VideoPrismVisionConfig
     input_modalities = ("video",)
-    base_model_prefix = "model"
+    base_model_prefix = "vision_model"
 
     def __init__(self, config: VideoPrismVisionConfig):
         super().__init__(config)

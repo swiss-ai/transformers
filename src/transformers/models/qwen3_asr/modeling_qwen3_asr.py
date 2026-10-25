@@ -33,7 +33,7 @@ from ...cache_utils import Cache
 from ...generation import GenerationMixin
 from ...modeling_layers import GenericForTokenClassification, GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, ModelOutput
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel, slice_logits_to_keep
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
 from ...utils.generic import get_max_seqlen, is_flash_attention_requested
@@ -48,7 +48,6 @@ class Qwen3ASRPreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     input_modalities = ("audio", "text")
     supports_gradient_checkpointing = True
-    _no_split_modules = ["Qwen3DecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = True
     _supports_sdpa = True
@@ -252,7 +251,7 @@ class SinusoidsPositionEmbedding(nn.Module):
         if channels % 2 != 0:
             raise ValueError("SinusoidsPositionEmbedding needs even channels input")
         position_embedding = self.compute_default_singular_positional_embedding()
-        self.register_buffer("positional_embedding", position_embedding, persistent=False)
+        self.positional_embedding = nn.Buffer(position_embedding, persistent=False)
 
     def compute_default_singular_positional_embedding(self):
         log_timescale_increment = np.log(self.max_timescale) / (self.channels // 2 - 1)
@@ -609,6 +608,7 @@ class Qwen3ASRCausalLMOutputWithPast(ModelOutput):
 )
 class Qwen3ASRForConditionalGeneration(Qwen3ASRPreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
+    _tp_plan = {"lm_head": "colwise_gather_output"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -663,8 +663,8 @@ class Qwen3ASRForConditionalGeneration(Qwen3ASRPreTrainedModel, GenerationMixin)
         )
 
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        hidden_states = slice_logits_to_keep(hidden_states, logits_to_keep)
+        logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:

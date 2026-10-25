@@ -23,7 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from math import pi
 
-from torch import Tensor, broadcast_tensors, nn
+import torch.nn as nn
+from torch import Tensor, broadcast_tensors
 
 from ... import initialization as init
 from ...activations import ACT2FN
@@ -31,10 +32,9 @@ from ...cache_utils import Cache
 from ...generation import GenerationMixin
 from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, ModelOutput
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from ...modeling_utils import PreTrainedModel
+from ...modeling_utils import PreTrainedModel, slice_logits_to_keep
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, is_torch_available, torch_compilable_check
-from ...utils.deprecation import deprecate_kwarg
 from ..auto import AutoModel
 from .configuration_musicflamingo import MusicFlamingoConfig
 
@@ -52,10 +52,7 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
     timestamps in seconds.
     """
 
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
-
-    @deprecate_kwarg("device", version="5.18")
-    def __init__(self, config: MusicFlamingoConfig, device=None):
+    def __init__(self, config: MusicFlamingoConfig):
         super().__init__()
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
@@ -66,15 +63,14 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
         rope_init_fn: Callable = self.compute_default_rope_parameters
         if self.rope_type != "default":
             rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
+        inv_freq, self.attention_scaling = rope_init_fn(self.config)
 
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
+        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
+        self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
         position_angles = self._compute_position_angles(self.inv_freq)
-        self.register_buffer("position_angles", position_angles, persistent=False)
+        self.position_angles = nn.Buffer(position_angles, persistent=False)
 
     @staticmethod
-    @deprecate_kwarg("device", version="5.18")
     def compute_default_rope_parameters(
         config: MusicFlamingoConfig, device=None, **kwargs
     ) -> tuple[torch.Tensor, float]:
@@ -187,7 +183,8 @@ def rotate_half(x):
 
 def apply_rotary_time_emb(hidden_states, cos, sin):
     original_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float64)
+    dtype = torch.float32 if hidden_states.device.type == "mps" else torch.float64
+    hidden_states = hidden_states.to(dtype)
     cos = cos.to(hidden_states)
     sin = sin.to(hidden_states)
     rot_dim = cos.shape[-1]
@@ -458,8 +455,8 @@ class MusicFlamingoForConditionalGeneration(MusicFlamingoPreTrainedModel, Genera
         )
 
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        hidden_states = slice_logits_to_keep(hidden_states, logits_to_keep)
+        logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:
