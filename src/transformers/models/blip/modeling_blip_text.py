@@ -30,7 +30,7 @@ from ...modeling_outputs import (
     BaseModelOutputWithPoolingAndCrossAttentions,
     CausalLMOutputWithCrossAttentions,
 )
-from ...modeling_utils import PreTrainedModel
+from ...modeling_utils import PreTrainedModel, slice_logits_to_keep
 from ...processing_utils import Unpack
 from ...pytorch_utils import apply_chunking_to_forward
 from ...utils import TransformersKwargs, can_return_tuple, logging
@@ -55,9 +55,7 @@ class BlipTextEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
-        self.register_buffer(
-            "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False
-        )
+        self.position_ids = nn.Buffer(torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False)
 
         self.config = config
 
@@ -65,7 +63,7 @@ class BlipTextEmbeddings(nn.Module):
         self,
         input_ids: torch.LongTensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         past_key_values_length: int = 0,
     ) -> torch.Tensor:
         if input_ids is not None:
@@ -132,9 +130,9 @@ class BlipTextSelfAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.FloatTensor | None = None,
-        encoder_hidden_states: torch.FloatTensor | None = None,
-        encoder_attention_mask: torch.FloatTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        encoder_attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -225,8 +223,8 @@ class BlipTextAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.FloatTensor | None = None,
-        encoder_hidden_states: torch.FloatTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -289,9 +287,9 @@ class BlipTextLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.FloatTensor | None = None,
-        attention_mask: torch.FloatTensor | None = None,
-        encoder_attention_mask: torch.FloatTensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        encoder_attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
@@ -330,9 +328,9 @@ class BlipTextEncoder(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.FloatTensor | None = None,
-        encoder_hidden_states: torch.FloatTensor | None = None,
-        encoder_attention_mask: torch.FloatTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        encoder_attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
@@ -468,7 +466,7 @@ class BlipTextModel(BlipTextPreTrainedModel):
     `encoder_hidden_states` is then expected as an input to the forward pass.
     """
 
-    def __init__(self, config, add_pooling_layer=True):
+    def __init__(self, config: BlipTextConfig, add_pooling_layer=True):
         super().__init__(config)
         self.config = config
 
@@ -501,10 +499,10 @@ class BlipTextModel(BlipTextPreTrainedModel):
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPoolingAndCrossAttentions:
         r"""
-        encoder_hidden_states  (`torch.FloatTensor`, *optional*):
+        encoder_hidden_states  (`torch.Tensor`, *optional*):
             Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention if
             the model is configured as a decoder.
-        encoder_attention_mask (`torch.FloatTensor`, *optional*):
+        encoder_attention_mask (`torch.Tensor`, *optional*):
             Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
             the cross-attention if the model is configured as a decoder. Mask values selected in `[0, 1]`:
             - 1 for tokens that are **not masked**,
@@ -587,7 +585,7 @@ class BlipTextLMHeadModel(BlipTextPreTrainedModel, GenerationMixin):
         "cls.predictions.decoder.weight": "bert.embeddings.word_embeddings.weight",
     }
 
-    def __init__(self, config):
+    def __init__(self, config: BlipTextConfig):
         super().__init__(config)
 
         self.bert = BlipTextModel(config, add_pooling_layer=False)
@@ -628,10 +626,10 @@ class BlipTextLMHeadModel(BlipTextPreTrainedModel, GenerationMixin):
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithCrossAttentions:
         r"""
-        encoder_hidden_states (`torch.FloatTensor`, *optional*): Sequence of
+        encoder_hidden_states (`torch.Tensor`, *optional*): Sequence of
             hidden-states at the output of the last layer of the encoder. Used in the cross-attention if the model is
             configured as a decoder.
-        encoder_attention_mask (`torch.FloatTensor`, *optional*):
+        encoder_attention_mask (`torch.Tensor`, *optional*):
             Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
             the cross-attention if the model is configured as a decoder. Mask values selected in `[0, 1]`:
             - 1 for tokens that are **not masked**,
@@ -649,6 +647,9 @@ class BlipTextLMHeadModel(BlipTextPreTrainedModel, GenerationMixin):
             If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
             `past_key_values`).
         """
+        # `shift_labels` holds targets that the caller has already aligned with the logits (sequence/context
+        # parallel training shifts before sharding), so pop it here rather than letting it reach the encoder.
+        shift_labels = kwargs.pop("shift_labels", None)
         if labels is not None:
             use_cache = False
 
@@ -666,20 +667,23 @@ class BlipTextLMHeadModel(BlipTextPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        # Only compute necessary logits
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        prediction_scores = self.cls(hidden_states[:, slice_indices, :])
+        hidden_states = slice_logits_to_keep(hidden_states, logits_to_keep)
+        prediction_scores = self.cls(hidden_states)
 
         if return_logits:
             return prediction_scores[:, :-1, :].contiguous()
 
         lm_loss = None
         if labels is not None:
-            # we are doing next-token prediction; shift prediction scores and input ids by one
-            shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
-            labels = labels[:, 1:].contiguous().to(shifted_prediction_scores.device)
+            if shift_labels is None:
+                # we are doing next-token prediction; shift prediction scores and input ids by one
+                shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+            else:
+                shifted_prediction_scores = prediction_scores.contiguous()
+            shift_labels = shift_labels.to(shifted_prediction_scores.device)
             loss_fct = CrossEntropyLoss(reduction=reduction, label_smoothing=self.label_smoothing)
-            lm_loss = loss_fct(shifted_prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            lm_loss = loss_fct(shifted_prediction_scores.view(-1, self.config.vocab_size), shift_labels.view(-1))
             if reduction == "none":
                 lm_loss = lm_loss.view(prediction_scores.size(0), -1).sum(1)
 

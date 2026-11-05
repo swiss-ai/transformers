@@ -55,6 +55,7 @@ if is_torch_available():
     import torch
     from torch import nn
 
+    from transformers import GenerationConfig
     from transformers.exporters.utils import (
         cast_leaf_tensors,
         decompose_prefill_decode,
@@ -203,9 +204,10 @@ class PatchRegistryEdgeCasesTest(unittest.TestCase):
         self.assertEqual(b.method(), "original")
 
     def test_register_patch_skips_unresolvable_path(self):
-        # Real backends only register paths that resolve; the silent-skip fallback is what lets
-        # `exporter_onnx.py` and `exporter_executorch.py` co-exist when only one backend is
-        # installed. If it ever started raising, one of the two backends would fail to import.
+        # Silent-skip lets exporters co-exist when only one backend is installed.
+        # Resolution moved from decoration time to apply_patches time (#50000): the string
+        # path is now stored in _PATCHES, but apply_patches drops it (resolves to None) —
+        # no patch installed, no exception, import-time safety unchanged.
         backend = "_test_unresolvable"
 
         @register_patch(backend, "does.not.exist.at.all")
@@ -213,7 +215,13 @@ class PatchRegistryEdgeCasesTest(unittest.TestCase):
             return original
 
         try:
-            self.assertEqual(exporter_utils._PATCHES.get(backend, []), [])
+            # String is stored (lazy — not resolved yet)
+            stored = exporter_utils._PATCHES.get(backend, [])
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0][:2], ("does.not.exist.at", "all"))
+            # apply_patches silently skips it — no patch installed, no exception
+            with exporter_utils.apply_patches(backend):
+                pass
         finally:
             exporter_utils._PATCHES.pop(backend, None)
 
@@ -273,6 +281,9 @@ class DecomposePrefillDecodeGuardTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.linear = nn.Linear(1, 1)
+                # `decompose_prefill_decode` bases its capture config on the model's own (mimics a
+                # real `PreTrainedModel`); the guard under test fires afterwards on the capture count.
+                self.generation_config = GenerationConfig()
 
             def forward(self, input_ids=None, **kwargs):
                 return input_ids

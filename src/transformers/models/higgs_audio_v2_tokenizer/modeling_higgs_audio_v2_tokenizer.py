@@ -46,11 +46,11 @@ class HiggsAudioV2TokenizerPreTrainedModel(PreTrainedAudioTokenizerBase):
     models.
     """
 
-    config_class = HiggsAudioV2TokenizerConfig
+    config: HiggsAudioV2TokenizerConfig
     base_model_prefix = "higgs_audio_v2_tokenizer"
     main_input_name = "input_values"
     input_modalities = "audio"
-    _no_split_modules = ["HiggsAudioV2TokenizerResidualVectorQuantization", "DacResidualUnit"]
+    _no_split_modules = ["HiggsAudioV2TokenizerResidualVectorQuantization"]
     _keys_to_ignore_on_load_unexpected = ["semantic_model.masked_spec_embed"]
 
     @torch.no_grad()
@@ -166,10 +166,10 @@ class HiggsAudioV2TokenizerEuclideanCodebook(nn.Module):
         super().__init__()
         embed = torch.zeros(config.codebook_size, config.codebook_dim)
         self.codebook_size = config.codebook_size
-        self.register_buffer("inited", torch.Tensor([True]))
-        self.register_buffer("cluster_size", torch.zeros(config.codebook_size))
-        self.register_buffer("embed", embed)
-        self.register_buffer("embed_avg", embed.clone())
+        self.inited = nn.Buffer(torch.Tensor([True]))
+        self.cluster_size = nn.Buffer(torch.zeros(config.codebook_size))
+        self.embed = nn.Buffer(embed)
+        self.embed_avg = nn.Buffer(embed.clone())
 
     def quantize(self, hidden_states):
         embed = self.embed.t()
@@ -216,12 +216,12 @@ class HiggsAudioV2TokenizerOutput(ModelOutput):
     Args:
         audio_codes (`torch.LongTensor`  of shape `(batch_size, num_quantizers, codes_length)`, *optional*):
             Discrete code indices computed using `model.encode`.
-        audio_values (`torch.FloatTensor` of shape `(batch_size, channels, num_samples)`, *optional*)
+        audio_values (`torch.Tensor` of shape `(batch_size, channels, num_samples)`, *optional*)
             Decoded audio values obtained using the decoder part of HiggsAudioV2Tokenizer.
     """
 
     audio_codes: torch.LongTensor | None = None
-    audio_values: torch.FloatTensor | None = None
+    audio_values: torch.Tensor | None = None
 
 
 @dataclass
@@ -239,11 +239,11 @@ class HiggsAudioV2TokenizerEncoderOutput(ModelOutput):
 class HiggsAudioV2TokenizerDecoderOutput(ModelOutput):
     """
     Args:
-        audio_values (`torch.FloatTensor`  of shape `(batch_size, channels, num_samples)`, *optional*):
+        audio_values (`torch.Tensor`  of shape `(batch_size, channels, num_samples)`, *optional*):
             Decoded audio values obtained using the decoder part of HiggsAudioV2Tokenizer.
     """
 
-    audio_values: torch.FloatTensor | None = None
+    audio_values: torch.Tensor | None = None
 
 
 class HiggsAudioV2TokenizerResidualUnit(nn.Module):
@@ -428,7 +428,7 @@ class HiggsAudioV2TokenizerResidualVectorQuantization(nn.Module):
     def encode(self, embeddings: torch.Tensor, bandwidth=None) -> torch.Tensor:
         """
         Encode the input tensor into discrete indices using RVQ, with the number of quantizers selected based on the given bandwidth.
-        Each quantizer /codebook residually quantizes the input and returns the nearest indices in terms of Euclidian distance.
+        Each quantizer /codebook residually quantizes the input and returns the nearest indices in terms of Euclidean distance.
         """
         num_quantizers = self.get_num_quantizers_for_bandwidth(bandwidth)
         residual = embeddings
@@ -454,7 +454,7 @@ class HiggsAudioV2TokenizerResidualVectorQuantization(nn.Module):
 @requires(backends=("torchaudio",))
 @auto_docstring(custom_intro="""The HiggsAudioV2Tokenizer neural audio codec model.""")
 class HiggsAudioV2TokenizerModel(HiggsAudioV2TokenizerPreTrainedModel):
-    def __init__(self, config):
+    def __init__(self, config: HiggsAudioV2TokenizerConfig):
         super().__init__(config)
         self.config = config
         self.pad = config.hop_length // 2
@@ -487,7 +487,7 @@ class HiggsAudioV2TokenizerModel(HiggsAudioV2TokenizerPreTrainedModel):
         if hasattr(decoder, "tanh") and isinstance(decoder.tanh, nn.Tanh):
             decoder.tanh = nn.Identity()
 
-    def _extract_semantic_features(self, input_values: torch.FloatTensor) -> torch.FloatTensor:
+    def _extract_semantic_features(self, input_values: torch.Tensor) -> torch.Tensor:
         if self.config.sample_rate != self.config.semantic_sample_rate:
             input_values = torchaudio.functional.resample(
                 input_values, self.config.sample_rate, self.config.semantic_sample_rate
@@ -517,7 +517,7 @@ class HiggsAudioV2TokenizerModel(HiggsAudioV2TokenizerPreTrainedModel):
         return_dict: bool | None = None,
     ) -> torch.Tensor | HiggsAudioV2TokenizerEncoderOutput:
         r"""
-        input_values (`torch.FloatTensor` of shape `(batch_size, channels, num_samples)`):
+        input_values (`torch.Tensor` of shape `(batch_size, channels, num_samples)`):
             Float values of the input audio waveform.
         bandwidth (`float`, *optional*):
             The target bandwidth in (kbps) supports only values in `config.target_bandwidths`.
@@ -599,7 +599,7 @@ class HiggsAudioV2TokenizerModel(HiggsAudioV2TokenizerPreTrainedModel):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor] | HiggsAudioV2TokenizerOutput:
         r"""
-        input_values (`torch.FloatTensor` of shape `(batch_size, channels, num_samples)`):
+        input_values (`torch.Tensor` of shape `(batch_size, channels, num_samples)`):
             The raw float values of the input audio waveform.
         audio_codes (`torch.LongTensor`  of shape `(batch_size, num_quantizers, codes_length)`:
             Discrete code indices computed using `model.encode`.
