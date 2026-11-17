@@ -46,7 +46,7 @@ from .configuration_xcodec2 import Xcodec2Config
 @dataclass
 class Xcodec2Output(ModelOutput):
     r"""
-    audio_values (`torch.FloatTensor` of shape `(batch_size, 1, sequence_length)`, *optional*):
+    audio_values (`torch.Tensor` of shape `(batch_size, 1, sequence_length)`, *optional*):
         Decoded audio waveform values in the time domain, obtained using the decoder
         part of Xcodec2. These represent the reconstructed audio signal.
     audio_codes (`torch.LongTensor` of shape `(batch_size, 1, codes_length)`, *optional*):
@@ -58,7 +58,7 @@ class Xcodec2Output(ModelOutput):
         Downsampled `padding_mask` for indicating valid audio codes in `audio_codes`.
     """
 
-    audio_values: torch.FloatTensor | None = None
+    audio_values: torch.Tensor | None = None
     audio_codes: torch.LongTensor | None = None
     latents: torch.Tensor | None = None
     audio_codes_mask: torch.Tensor | None = None
@@ -87,20 +87,17 @@ class Xcodec2EncoderOutput(ModelOutput):
 @dataclass
 class Xcodec2DecoderOutput(ModelOutput):
     r"""
-    audio_values (`torch.FloatTensor` of shape `(batch_size, 1, segment_length)`, *optional*):
+    audio_values (`torch.Tensor` of shape `(batch_size, 1, segment_length)`, *optional*):
         Decoded audio waveform values in the time domain, obtained by converting
         the discrete codes back into continuous audio signals. This represents
         the reconstructed audio that can be played back.
     """
 
-    audio_values: torch.FloatTensor | None = None
+    audio_values: torch.Tensor | None = None
 
 
 class Xcodec2RotaryEmbedding(nn.Module):
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
-
-    @deprecate_kwarg("device", version="5.18")
-    def __init__(self, config: Xcodec2Config, device=None):
+    def __init__(self, config: Xcodec2Config):
         super().__init__()
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
@@ -111,14 +108,13 @@ class Xcodec2RotaryEmbedding(nn.Module):
         rope_init_fn: Callable = self.compute_default_rope_parameters
         if self.rope_type != "default":
             rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
+        inv_freq, self.attention_scaling = rope_init_fn(self.config)
 
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
+        self.inv_freq = nn.Buffer(inv_freq, persistent=False)
+        self.original_inv_freq = nn.Buffer(inv_freq.clone(), persistent=False)
 
     @staticmethod
-    @deprecate_kwarg("device", version="5.18")
-    def compute_default_rope_parameters(config: Xcodec2Config, device=None, **kwargs) -> tuple[torch.Tensor, float]:
+    def compute_default_rope_parameters(config: Xcodec2Config, **kwargs) -> tuple[torch.Tensor, float]:
         """
         Computes the inverse frequencies according to the original RoPE implementation
         Args:
@@ -134,23 +130,14 @@ class Xcodec2RotaryEmbedding(nn.Module):
         attention_factor = 1.0  # Unused in this type of RoPE
         # Compute the inverse frequencies
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
-        return inv_freq.to(device), attention_factor
+        return inv_freq, attention_factor
 
-    @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
-        inv_freq_expanded = (
-            self.inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1).to(dtype=torch.float, device=x.device)
-        )
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        # Disable any outside autocast context if any, to really force fp32
-        with maybe_autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
+        freqs = position_ids[..., None].float() * self.inv_freq.to(device=x.device, dtype=torch.float)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * self.attention_scaling
+        sin = emb.sin() * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
@@ -267,12 +254,13 @@ class Xcodec2Attention(nn.Module):
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
 
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
-        past_key_values: Cache | None = None,
+        cache: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
@@ -288,8 +276,8 @@ class Xcodec2Attention(nn.Module):
         # q/k of shape (batch, num_heads, seq_len, head_dim), unlike Llama's default of 1.
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
 
-        if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+        if cache is not None:
+            key_states, value_states = cache.update(key_states, value_states, self.layer_idx, kwargs=kwargs)
 
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
@@ -343,12 +331,13 @@ class Xcodec2DecoderLayer(GradientCheckpointingLayer):
         self.input_layernorm = Xcodec2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Xcodec2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: Cache | None = None,
+        cache: Cache | None = None,
         use_cache: bool | None = False,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[TransformersKwargs],
@@ -360,7 +349,7 @@ class Xcodec2DecoderLayer(GradientCheckpointingLayer):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            cache=cache,
             use_cache=use_cache,
             position_embeddings=position_embeddings,
             **kwargs,
@@ -481,7 +470,7 @@ class Xcodec2DownSample1d(nn.Module):
         self.pad_right = kernel_size // 2
         self.stride = ratio
         filter = kaiser_sinc_filter1d(cutoff, half_width, kernel_size)
-        self.register_buffer("filter", filter, persistent=False)
+        self.filter = nn.Buffer(filter, persistent=False)
 
     def forward(self, hidden_states):
         channels = hidden_states.shape[1]
@@ -507,7 +496,7 @@ class Xcodec2UpSample1d(nn.Module):
         self.pad_right = self.pad * self.stride + (self.kernel_size - self.stride + 1) // 2
 
         filter = kaiser_sinc_filter1d(cutoff=0.5 / ratio, half_width=0.6 / ratio, kernel_size=self.kernel_size)
-        self.register_buffer("filter", filter, persistent=False)
+        self.filter = nn.Buffer(filter, persistent=False)
 
     def forward(self, hidden_states):
         channels = hidden_states.shape[1]
@@ -675,9 +664,9 @@ class Xcodec2FiniteScalarQuantization(nn.Module):
         super().__init__()
         self.quantization_levels = list(config.quantization_levels)
         levels, basis, codebook = self._compute_buffers()
-        self.register_buffer("levels", levels, persistent=False)
-        self.register_buffer("basis", basis, persistent=False)
-        self.register_buffer("codebook", codebook, persistent=False)
+        self.levels = nn.Buffer(levels, persistent=False)
+        self.basis = nn.Buffer(basis, persistent=False)
+        self.codebook = nn.Buffer(codebook, persistent=False)
 
     def _compute_buffers(self, device=None):
         """Compute the levels, basis, and codebook buffers for the FSQ quantizer."""
@@ -724,13 +713,9 @@ class Xcodec2FiniteScalarQuantization(nn.Module):
         return (hidden_states + shift).tanh() * half_range - offset
 
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # NOTE: could rerwite to pass tensor to a decorator such that device type is handled internally
+        # NOTE: could rewrite to pass tensor to a decorator such that device type is handled internally
         original_dtype = hidden_states.dtype
-        device_type = (
-            hidden_states.device.type
-            if isinstance(hidden_states.device.type, str) and hidden_states.device.type != "mps"
-            else "cpu"
-        )
+        device_type = hidden_states.device.type if isinstance(hidden_states.device.type, str) else "cpu"
         with maybe_autocast(device_type=device_type, enabled=False):  # Force float32
             hidden_states = hidden_states.float()
             half_width = self.levels // 2
@@ -760,23 +745,24 @@ class Xcodec2ISTFTHead(nn.Module):
         self.hop_length = config.hop_length
         self.padding = (self.n_fft - self.hop_length) // 2
         window = torch.hann_window(config.n_fft)
-        self.register_buffer("window", window, persistent=False)
+        self.window = nn.Buffer(window, persistent=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        stft_pred = self.linear(hidden_states).transpose(1, 2)
-        magnitude, phase = stft_pred.chunk(2, dim=1)
+        stft_pred = self.linear(hidden_states)
+        # Keep the frequency axis last for `torch.polar` compatibility with torch.compile
+        magnitude, phase = stft_pred.chunk(2, dim=-1)
         # Cast to float32: complex exponential and irfft are not supported for fp16 (ComplexHalf)
         magnitude = magnitude.float()
         phase = phase.float()
         # Clamp like original: https://huggingface.co/HKUSTAudio/xcodec2/blob/main/vq/codec_decoder_vocos.py#L138
         magnitude = torch.exp(magnitude).clamp(max=1e2)
-        spectrogram_complex = magnitude * torch.exp(1j * phase)
+        spectrogram_complex = torch.polar(magnitude, phase)
 
         # Back to audio (ISTFT with manual "same" padding: torch.istft lacks a native same-padding mode,
         # so we use irfft + fold with explicit pre-computed padding to replicate it)
-        time_frames = torch.fft.irfft(spectrogram_complex, self.n_fft, dim=1, norm="backward")
+        time_frames = torch.fft.irfft(spectrogram_complex, self.n_fft, dim=-1, norm="backward").transpose(1, 2)
         time_frames = time_frames * self.window[None, :, None]
-        num_frames = spectrogram_complex.shape[-1]
+        num_frames = spectrogram_complex.shape[1]
         output_size = (num_frames - 1) * self.hop_length + self.n_fft
         audio = F.fold(
             time_frames,
@@ -917,7 +903,7 @@ class Xcodec2PreTrainedModel(PreTrainedModel):
     input_modalities = ("audio",)
     supports_gradient_checkpointing = True
     _no_split_modules = None
-    _skip_keys_device_placement = ["past_key_values"]
+    _skip_keys_device_placement = ["cache"]
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
@@ -953,7 +939,7 @@ class Xcodec2PreTrainedModel(PreTrainedModel):
 
 @auto_docstring(custom_intro="Xcodec2 neural audio codec model.")
 class Xcodec2Model(Xcodec2PreTrainedModel):
-    config_class = Xcodec2Config
+    config: Xcodec2Config
 
     def __init__(self, config: Xcodec2Config):
         super().__init__(config)

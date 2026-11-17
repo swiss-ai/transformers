@@ -70,7 +70,13 @@ def _json(text: str, args: dict) -> Any:
         working = re.sub(pattern, _capture, working, flags=re.DOTALL)
 
     if unquoted_keys:
-        working = re.sub(r"(?<=[{,])(\w+):", r'"\1":', working)
+        # The first alternative swallows whole quoted strings (escapes included) and puts them back untouched,
+        # so that key-like text inside a string value is never rewritten. Only the second one is a bare key.
+        working = re.sub(
+            r'"(?:\\.|[^"\\])*"|(?<=[{,])(\w+):',
+            lambda m: m.group(0) if m.group(1) is None else f'"{m.group(1)}":',
+            working,
+        )
 
     for i, s in enumerate(captured):
         working = working.replace(f"{_LAX_OPEN}{i}{_LAX_CLOSE}", json.dumps(s))
@@ -105,6 +111,7 @@ def _xml_inline(text: str, args: dict) -> dict:
     merge = args.get("merge_duplicates", False)
 
     out: dict[str, Any] = {}
+    merged: set[str] = set()
     for m in re.finditer(tag_pattern, text, flags=re.DOTALL):
         groups = m.groupdict()
         key = groups.get("key")
@@ -112,8 +119,9 @@ def _xml_inline(text: str, args: dict) -> dict:
             raise ValueError(f"xml-inline: tag_pattern must have a named group 'key'. Pattern: {tag_pattern}")
         value = _sub_parse(groups.get("value", ""), value_parser)
         if key in out and merge:
-            if not isinstance(out[key], list):
+            if key not in merged:
                 out[key] = [out[key]]
+                merged.add(key)
             out[key].append(value)
         else:
             out[key] = value
@@ -159,12 +167,13 @@ def parse_content(text: str, name: str, args: dict) -> Any:
     return CONTENT_PARSERS[name](text, args)
 
 
-_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+_PLACEHOLDER = re.compile(r"\{(\w+(?:\.\w+)*)\}")
 
 
 def _apply_transform(transform: Any, scope: dict) -> Any:
     """Recursively walk a transform template, which is used to restructure
-    parsed output into the actual shape we want."""
+    parsed output into the actual shape we want. A dotted placeholder like
+    `{content.args}` descends into keys of the looked-up value."""
     if isinstance(transform, dict):
         return {k: _apply_transform(v, scope) for k, v in transform.items()}
     if isinstance(transform, list):
@@ -174,10 +183,18 @@ def _apply_transform(transform: Any, scope: dict) -> Any:
     whole = _PLACEHOLDER.fullmatch(transform)
     if not whole:
         return transform
-    key = whole.group(1)
-    if key not in scope:
-        raise KeyError(f"transform placeholder '{{{key}}}' is not defined. Available: {sorted(scope)}")
-    return scope[key]
+    path = whole.group(1)
+    root, *keys = path.split(".")
+    if root not in scope:
+        raise KeyError(f"transform placeholder '{{{path}}}' is not defined. Available: {sorted(scope)}")
+    value = scope[root]
+    for key in keys:
+        if not isinstance(value, dict):
+            raise ValueError(f"transform placeholder '{{{path}}}' cannot index into {type(value).__name__} at '{key}'")
+        if key not in value:
+            raise ValueError(f"transform placeholder '{{{path}}}' is missing key '{key}'. Available: {sorted(value)}")
+        value = value[key]
+    return value
 
 
 def validate_transform_strings(scope: str, transform: Any) -> None:

@@ -40,9 +40,9 @@ models exportable. The export pipeline uses five sections, in execution order:
 from __future__ import annotations
 
 import copy
-import importlib
 import inspect
 import sys
+import types
 from collections.abc import MutableMapping
 from contextlib import contextmanager
 from typing import Any
@@ -50,15 +50,16 @@ from typing import Any
 from ..utils import logging
 from ..utils.import_utils import is_detectron2_available, is_torch_available, torch_compilable_check
 from .base import HfExporter
-from .configs import DynamoConfig
-from .utils import apply_patches, patch_attributes, prepare_for_export, register_patch
+from .configs import DynamoConfig, ExportFormat
+from .metadata import ExportMetadata, build_export_metadata
+from .utils import apply_patches, import_dotted_path, patch_attributes, prepare_for_export, register_patch
 
 
 if is_torch_available():
     import torch
     from torch.export import ExportedProgram
 
-    from ..cache_utils import Cache
+    from ..cache_utils import Cache, DynamicLayer
     from ..modeling_utils import PreTrainedModel
 
 
@@ -75,34 +76,47 @@ class DynamoExporter(HfExporter):
 
     >>> exporter = DynamoExporter()
     >>> exported = exporter.export(model, inputs, config=DynamoConfig(dynamic=True))
-    >>> outputs = exported.module()(**inputs)
+    >>> outputs = exported(**inputs)
+    >>> exported.save_pretrained("exported")  # `model.pt2`, its metadata and the model config
     ```
     """
+
+    export_format = ExportFormat.DYNAMO
+    config_class = DynamoConfig
+    program_suffix = ".pt2"
+    # `torch.export.load` unpickles the program
+    requires_trust_remote_code = True
 
     required_packages = ["torch"]
     min_versions = {"torch": "2.11.0"}
     tested_versions = {"torch": "2.12.0"}
 
-    def export(
+    def export_program(
         self,
         model: PreTrainedModel,
         sample_inputs: MutableMapping[str, Any],
-        config: DynamoConfig | dict[str, Any],
-    ) -> ExportedProgram:
-        if isinstance(config, dict):
-            config = DynamoConfig(**config)
-        elif not isinstance(config, DynamoConfig):
-            raise TypeError(f"Expected config to be a DynamoConfig or dict, got {type(config)}")
+        config: DynamoConfig,
+    ) -> tuple[ExportedProgram, ExportMetadata]:
+        if config.quantizer is not None:
+            config.quantizer.validate_environment(config.export_format)
 
         model, sample_inputs, output_flags = prepare_for_export(model, sample_inputs)
 
         dynamic_shapes = config.dynamic_shapes
         if config.dynamic and dynamic_shapes is None:
+            logger.warning_once(
+                "`dynamic=True` with no explicit `dynamic_shapes` marks every input axis `Dim.AUTO`, so "
+                "torch.export resolves symbolic shapes for all of them — including axes that are actually "
+                "fixed (batch, a size-1 decode step, num_heads/head_dim). Passing explicit `dynamic_shapes` "
+                "that mark only the axes which vary bypasses that symbolic-shape resolution and exports "
+                "significantly faster."
+            )
             dynamic_shapes = get_auto_dynamic_shapes(sample_inputs)
 
         register_cache_pytrees_for_model(model)
 
         with (
+            torch.no_grad(),
             apply_patches("dynamo"),
             reset_model_state(model),
             patch_model_config(model, output_flags),
@@ -117,17 +131,37 @@ class DynamoExporter(HfExporter):
                 prefer_deferred_runtime_asserts_over_guards=config.prefer_deferred_runtime_asserts_over_guards,
             )
 
-        return exported_program
+        quantizer = config.quantizer
+        if quantizer is not None and quantizer.quantizes_fx_graph:
+            quantized = quantizer.quantize(exported_program.module(), sample_inputs, config.export_format)
+            # FX quantizers return a `GraphModule`, and the backends take an `ExportedProgram`: export it again.
+            # Never strict: Dynamo refuses to trace an exported `GraphModule`, and there is no Python left to check.
+            exported_program = torch.export.export(
+                quantized,
+                args=(),
+                kwargs=copy.deepcopy(dict(sample_inputs)),
+                dynamic_shapes=dynamic_shapes,
+                prefer_deferred_runtime_asserts_over_guards=config.prefer_deferred_runtime_asserts_over_guards,
+            )
+
+        metadata = build_export_metadata(model, sample_inputs, exported_program, self.required_packages)
+        return exported_program, metadata
+
+    @classmethod
+    def save_program(cls, program: ExportedProgram, path) -> None:
+        torch.export.save(program, str(path))
+
+    @classmethod
+    def load_program(cls, path) -> ExportedProgram:
+        return torch.export.load(str(path))
 
 
 # ── Stage 1: Model signature patch ──────────────────────────────────────────
 # Replaces `model.forward` with a flat explicit signature derived from the
 # inputs dict so `torch.export` does not expand `**kwargs` into a large bundle.
-# `patch_model_config` lives here too — it strips output flags from the inputs
-# and applies them onto `model.config` for the duration of the trace.
+# `patch_model_config` applies the output flags to `model.config` for the trace.
 
 
-# Output flags stripped from inputs and applied onto `model.config` for the trace.
 @contextmanager
 def patch_model_config(model: PreTrainedModel, output_flags: dict[str, Any]):
     """Reversibly tweak `model.config` for the trace:
@@ -135,8 +169,6 @@ def patch_model_config(model: PreTrainedModel, output_flags: dict[str, Any]):
     - Applies `output_flags` (popped from inputs by `prepare_for_export`) onto
       `model.config.<flag>` so the model picks them up via its usual `<flag> if <flag> is
       not None else self.config.<flag>` fallback.
-    - Disables `use_mamba_kernels` on every submodel's config that declares it (mamba/jamba
-      kernels are not exportable).
 
     Originals are restored on exit. Flags whose value is `None`, or that the config doesn't
     declare, are silently skipped — useful for submodels that don't accept every parent flag.
@@ -146,9 +178,6 @@ def patch_model_config(model: PreTrainedModel, output_flags: dict[str, Any]):
         if value is None or not hasattr(model, "config") or not hasattr(model.config, flag):
             continue
         config_patches.append((model.config, flag, lambda _original, v=value: v))
-    for module in model.modules():
-        if hasattr(module, "config") and hasattr(module.config, "use_mamba_kernels"):
-            config_patches.append((module.config, "use_mamba_kernels", lambda _original: False))
     with patch_attributes(config_patches):
         yield
 
@@ -193,6 +222,21 @@ def patch_forward_signature(model: PreTrainedModel, inputs: dict[str, Any]):
 # Multiple paths share the same factory when the same method shape needs to be
 # swapped across several classes (e.g. `_reshaped_vision_attention_forward`
 # applied to every chunked-vision attention class — see the long list below).
+
+
+@register_patch(
+    "dynamo",
+    "transformers.cache_utils.DynamicSlidingWindowLayer.update",
+    "transformers.cache_utils.DynamicSlidingWindowLayer.get_mask_sizes",
+    "transformers.cache_utils.DynamicSlidingWindowLayer.get_seq_length",
+)
+def _patch_sliding_window_layer(original):
+    """Trace sliding-window cache layers as a full `DynamicLayer`; the sliding mask still applies the window.
+
+    A trace bakes in the sliding layer's Python token counter and its cut to the window, so the exported decode breaks
+    past the window. Temporary: it goes once huggingface/transformers#49542 keeps sliding-window decode on one graph.
+    """
+    return getattr(DynamicLayer, original.__name__)
 
 
 @register_patch("dynamo", "transformers.models.nllb_moe.modeling_nllb_moe.NllbMoeTop2Router._cast_classifier")
@@ -285,8 +329,10 @@ def _reshaped_vision_attention_forward(
         "Chunked vision attention received an empty input.",
     )
     num_segments = cu_seqlens.shape[0] - 1
+    # The reshape-into-batch below needs equal-length segments.
+    segment_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     torch_compilable_check(
-        seq_length % num_segments == 0,
+        (segment_lengths == segment_lengths[0]).all(),
         "Chunked vision attention requires uniform segment lengths during export. "
         "Ensure all images have the same resolution (use do_resize=True in the processor) "
         "or pad inputs to a common size.",
@@ -310,9 +356,13 @@ def _reshaped_vision_attention_forward(
         q_proj = getattr(self, "q_proj", getattr(self, "q", None))
         k_proj = getattr(self, "k_proj", getattr(self, "k", None))
         v_proj = getattr(self, "v_proj", getattr(self, "v", None))
+        num_key_value_heads = getattr(self, "num_key_value_heads", self.num_heads)
         query_states = q_proj(hidden_states).view(seq_length, self.num_heads, self.head_dim)
-        key_states = k_proj(hidden_states).view(seq_length, self.num_heads, self.head_dim)
-        value_states = v_proj(hidden_states).view(seq_length, self.num_heads, self.head_dim)
+        key_states = k_proj(hidden_states).view(seq_length, num_key_value_heads, self.head_dim)
+        value_states = v_proj(hidden_states).view(seq_length, num_key_value_heads, self.head_dim)
+        # qk-norm encoders (lfm3_vl) normalize the heads before rotary
+        if hasattr(self, "q_norm"):
+            query_states, key_states = self.q_norm(query_states), self.k_norm(key_states)
 
     if position_embeddings is not None:
         # Each vision encoder ships its own ``apply_rotary_pos_emb_vision`` in its modeling file
@@ -375,20 +425,28 @@ def _reshaped_vision_attention_forward(
     "transformers.models.glm4v.modeling_glm4v.Glm4vVisionAttention.forward",
     "transformers.models.glm4v_moe.modeling_glm4v_moe.Glm4vMoeVisionAttention.forward",
     "transformers.models.glm_ocr.modeling_glm_ocr.GlmOcrVisionAttention.forward",
+    "transformers.models.dots3_note.modeling_dots3_note.Dots3NoteVisionAttention.forward",
     "transformers.models.ernie4_5_vl_moe.modeling_ernie4_5_vl_moe.Ernie4_5_VLMoeVisionAttention.forward",
+    # Combined `qkv` + optional `(cos, sin)` rotary + `.proj`
+    "transformers.models.cohere_compass.modeling_cohere_compass.CohereCompassVisionAttention.forward",
     # Asymmetric `qkv` split + `(cos, sin)` rotary + `.proj`
     "transformers.models.exaone4_5.modeling_exaone4_5.Exaone4_5_VisionAttention.forward",
-    # Combined `qkv` + no in-attention rotary + `.proj`
-    "transformers.models.glm_image.modeling_glm_image.GlmImageVisionAttention.forward",
     # Separate `.q` / `.k` / `.v` + single rotary tensor + `.proj`
     "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniVisionAttention.forward",
     # Separate `q_proj`/`k_proj`/`v_proj` + `(cos, sin)` rotary + `.proj` (single return)
     "transformers.models.kimi_k25.modeling_kimi_k25.Kimi_K25VisionAttention.forward",
+    "transformers.models.muse_glimmer.modeling_muse_glimmer.MuseGlimmerVisionAttention.forward",
+    "transformers.models.muse_spark.modeling_muse_spark.MuseSparkVisionAttention.forward",
     # Separate `_proj` + `(cos, sin)` rotary + `.out_proj` (tuple return)
+    "transformers.models.lfm3_vl.modeling_lfm3_vl.Lfm3VlVisionAttention.forward",
     "transformers.models.video_llama_3.modeling_video_llama_3.VideoLlama3VisionAttention.forward",
     "transformers.models.paddleocr_vl.modeling_paddleocr_vl.PaddleOCRVisionAttention.forward",
+    "transformers.models.minimax_m3_vl.modeling_minimax_m3_vl.MiniMaxM3VLVisionAttention.forward",
+    "transformers.models.inkling2.modeling_inkling2.Inkling2VisionAttention.forward",
     # NaViT (1, T, D) + separate `_proj` + `.out_proj` (tuple return)
+    "transformers.models.minicpm_ocr.modeling_minicpm_ocr.MiniCPMOcrVisionAttention.forward",
     "transformers.models.minicpmv4_6.modeling_minicpmv4_6.MiniCPMV4_6VisionAttention.forward",
+    "transformers.models.minicpmv4_7.modeling_minicpmv4_7.MiniCPMV4_7VisionAttention.forward",
     # Audio attention: separate `_proj` + `.out_proj`, no rotary
     "transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniAudioAttention.forward",
     "transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe.Qwen3OmniMoeAudioAttention.forward",
@@ -420,11 +478,19 @@ def _class_to_path(cls: type) -> str:
 
 
 def _path_to_class(path: str) -> type:
-    module_name, qualname = path.split(":", 1)
-    obj = importlib.import_module(module_name)
-    for part in qualname.split("."):
-        obj = getattr(obj, part)
-    return obj
+    return import_dotted_path(path.replace(":", "."))
+
+
+def _maybe_sym_constant(sym: Any) -> Any:
+    """The concrete value a ``Sym*`` has already specialized to, or ``None`` if it's still dynamic.
+    Each ``Sym*`` type has its own accessor (``maybe_as_bool``/``maybe_as_float``/``maybe_as_int``);
+    there is no generic one."""
+    node = sym.node
+    if isinstance(sym, torch.SymBool):
+        return node.maybe_as_bool()
+    if isinstance(sym, torch.SymFloat):
+        return node.maybe_as_float()
+    return node.maybe_as_int()
 
 
 def _flatten_to_context(obj: Any, tensors: list) -> Any:
@@ -435,7 +501,11 @@ def _flatten_to_context(obj: Any, tensors: list) -> Any:
     if type(obj) is list:
         return [_flatten_to_context(i, tensors) for i in obj]
     if type(obj) is dict:
-        return {k: _flatten_to_context(v, tensors) for k, v in obj.items()}
+        if all(type(k) is str for k in obj):
+            return {k: _flatten_to_context(v, tensors) for k, v in obj.items()}
+        # As pairs: JSON keys are strings, so a saved program would read `EncoderDecoderCache.is_updated`'s int keys
+        # back as strings, and its input spec would no longer match the cache it is called with.
+        return {"_t": "items", "v": [[k, _flatten_to_context(v, tensors)] for k, v in obj.items()]}
 
     # --- Torch objects ---
     if isinstance(obj, torch.Tensor):
@@ -451,6 +521,17 @@ def _flatten_to_context(obj: Any, tensors: list) -> Any:
     if isinstance(obj, torch.layout):
         return {"_t": "layout", "n": str(obj).removeprefix("torch.")}
     if isinstance(obj, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+        # A Sym* that has already specialized to a concrete constant is not a genuine dynamic
+        # graph output — bake it as a plain scalar instead of a leaf. Leaving it as a leaf makes
+        # flatten non-deterministic: the same field can be a constant-valued SymInt at one trace
+        # point (the dynamo out_spec capture) and an already-materialized python scalar at another
+        # (the aot-decomposition retrace), so the leaf count flips and `treespec.unflatten` fails
+        # with an off-by-one. deepseek_v4 hits this via two sibling cache layers
+        # (DeepseekV4HCACache / DeepseekV4CSACache) sharing a `cumulative_length` counter that one
+        # path leaves as a constant SymInt and the other as a python int.
+        const = _maybe_sym_constant(obj)
+        if const is not None:
+            return const
         idx = len(tensors)
         tensors.append(obj)
         return {"_t": "sym", "i": idx}
@@ -473,12 +554,15 @@ def _flatten_to_context(obj: Any, tensors: list) -> Any:
             "p": _class_to_path(cls),
             "v": [_flatten_to_context(i, tensors) for i in obj],
         }
+    if isinstance(obj, types.MethodType):
+        # A bound method can't be flattened into pytree context. Models shouldn't bind methods onto
+        # objects they return at forward time (e.g. recurrent_gemma binds `get_seq_length`/
+        # `get_mask_sizes` onto its `DynamicCache`) — that pattern isn't exportable; such a model is
+        # skipped until the binding is refactored away (e.g. into a `Cache` subclass).
+        raise TypeError("Cannot flatten a bound method for pytree context")
     if hasattr(obj, "__dict__"):
-        return {
-            "_t": "obj",
-            "p": _class_to_path(cls),
-            "s": {k: _flatten_to_context(v, tensors) for k, v in vars(obj).items()},
-        }
+        state = {k: _flatten_to_context(v, tensors) for k, v in vars(obj).items()}
+        return {"_t": "obj", "p": _class_to_path(cls), "s": state}
 
     raise TypeError(f"Cannot flatten {type(obj).__name__} for pytree context")
 
@@ -508,6 +592,9 @@ def _unflatten_from_context(ctx: Any, tensors: list) -> Any:
     if t == "sym":
         return tensors[ctx["i"]]
 
+    if t == "items":
+        return {k: _unflatten_from_context(v, tensors) for k, v in ctx["v"]}
+
     # --- Python types ---
     if t == "type":
         return _path_to_class(ctx["p"])
@@ -525,9 +612,9 @@ def _unflatten_from_context(ctx: Any, tensors: list) -> Any:
             return cls(*items)  # NamedTuple (requires positional args)
     if t == "obj":
         cls = _path_to_class(ctx["p"])
-        state = {k: _unflatten_from_context(v, tensors) for k, v in ctx["s"].items()}
         instance = cls.__new__(cls)
-        instance.__dict__.update(state)
+        for k, v in ctx["s"].items():
+            instance.__dict__[k] = _unflatten_from_context(v, tensors)
         return instance
 
     raise TypeError(f"Unknown tag {t!r} in pytree context")
@@ -548,7 +635,9 @@ def _pytree_unflatten(values, context: Any) -> Any:
     return _unflatten_from_context(context, list(values))
 
 
-def _register_pytree_node(object_cls: type):
+def register_pytree_node(object_cls: type):
+    """Register a single class (e.g. a `Cache` subclass like `StaticCache`) as a torch.export pytree
+    node, so `torch.export.load` can unflatten it as a graph input without needing the original model."""
     try:
         torch.utils._pytree.register_pytree_node(
             object_cls,
@@ -568,27 +657,34 @@ def _iter_subclasses(cls: type):
         yield from _iter_subclasses(subclass)
 
 
+def is_cache_class(cls: type) -> bool:
+    """Whether ``cls`` is a cache type — a [`Cache`] subclass, or a model-specific class following
+    the ``*Cache`` naming convention (e.g. ``xLSTMCache``, ``MimiConv1dPaddingCache``)."""
+    return issubclass(cls, Cache) or cls.__name__.endswith("Cache")
+
+
+def is_cache_object(value: Any) -> bool:
+    """Whether ``value`` is a cache, by the same rule [`register_cache_pytrees_for_model`] uses to
+    decide what to register as a pytree node."""
+    return is_cache_class(type(value))
+
+
 def register_cache_pytrees_for_model(model: PreTrainedModel):
     """Register all relevant cache types as pytree nodes for torch.export."""
     # All transformers Cache subclasses
     for cache_type in _iter_subclasses(Cache):
-        _register_pytree_node(cache_type)
+        register_pytree_node(cache_type)
 
-    # Model-specific cache classes not inheriting from Cache (e.g. custom per-model caches)
+    # Model-specific cache classes (e.g. custom per-model caches not inheriting from Cache)
     for _, obj in inspect.getmembers(inspect.getmodule(model)):
-        if (
-            inspect.isclass(obj)
-            and obj.__module__ == model.__class__.__module__
-            and obj.__name__.endswith("Cache")
-            and not issubclass(obj, Cache)
-        ):
-            _register_pytree_node(obj)
+        if inspect.isclass(obj) and obj.__module__ == model.__class__.__module__ and is_cache_class(obj):
+            register_pytree_node(obj)
 
     # detectron2 ImageList (used by layoutlmv2)
     if is_detectron2_available() and isinstance(model, PreTrainedModel) and model.config.model_type == "layoutlmv2":
         from detectron2.structures.image_list import ImageList
 
-        _register_pytree_node(ImageList)
+        register_pytree_node(ImageList)
 
 
 # ── Stage 4: Dynamic shapes ─────────────────────────────────────────────────
@@ -606,8 +702,9 @@ def get_auto_dynamic_shapes(inputs: Any) -> Any:
 
     - Tensors → per-dimension Dim.AUTO spec.
     - Scalars / None → None (no dynamic dims).
-    - Objects with ``__dict__`` (ModelOutput, Cache, …) → flat list of leaf specs,
-      matching the ``TreeSpec(list, …)`` that torch.export produces for these types.
+    - Registered pytree nodes (ModelOutput, Cache, …) → list of one spec per child of the
+      registered flatten, recursed, matching the ``TreeSpec(list, …)`` torch.export compares against.
+    - Other objects with ``__dict__`` → flat list of leaf specs.
     - Lists / tuples → same container type, recursed element-wise.
     - Plain dicts → recursed dict of specs.
     - Everything else → None.
@@ -616,13 +713,21 @@ def get_auto_dynamic_shapes(inputs: Any) -> Any:
         return _auto_dynamic_shape(inputs)
     if inputs is None or isinstance(inputs, (int, float, bool, str)):
         return None
-    if hasattr(inputs, "__dict__"):
-        leaves, _ = _pytree_flatten(inputs)
-        return get_auto_dynamic_shapes(leaves)
     if type(inputs) in (list, tuple, set, frozenset):
         return type(inputs)(get_auto_dynamic_shapes(v) for v in inputs)
     if type(inputs) is dict:
         return {k: get_auto_dynamic_shapes(v) for k, v in inputs.items()}
+    if (node := torch.utils._pytree.SUPPORTED_NODES.get(type(inputs))) is not None:
+        # Registered pytree node (a `ModelOutput`, a `Cache` subclass, ...). Mirror one level of its
+        # registered flatten and recurse, so a field holding a container keeps that container in the
+        # spec. A `Cache` is registered with a flatten that collapses to tensors, so it still yields a
+        # flat list; a `ModelOutput` yields one child per field, which is what `torch.export` compares
+        # against -- flattening it to tensors hands over a flat spec where nested children are expected.
+        children, _ = node.flatten_fn(inputs)
+        return [get_auto_dynamic_shapes(child) for child in children]
+    if hasattr(inputs, "__dict__"):
+        leaves, _ = _pytree_flatten(inputs)
+        return get_auto_dynamic_shapes(leaves)
     return None
 
 
@@ -638,8 +743,6 @@ def get_auto_dynamic_shapes(inputs: Any) -> Any:
 # To register a new stateful attribute: append its name to `_STATEFUL_CACHE_ATTRS`.
 
 _STATEFUL_CACHE_ATTRS = (
-    "_cached_decode_position_ids",  # glm_image (m-rope decode position ids)
-    "_prefill_len",  # glm_image (m-rope prefill length)
     "cached_rotary_positional_embedding",  # wav2vec2_bert, seamless_m4t, clvp
     "cached_sequence_length",  # wav2vec2_bert, seamless_m4t, clvp
 )
